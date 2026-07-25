@@ -472,9 +472,11 @@ if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
+    ufw allow 53/udp >/dev/null 2>&1
+    ufw allow 53/tcp >/dev/null 2>&1
     success "UFW rules applied"
 else
-    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447"
+    warn "ufw not found — open ports manually: 22 80 109 143 443 447/tcp, 53/udp"
 fi
 
 # ═══════════════════════════════════════════
@@ -492,6 +494,46 @@ fi
 systemctl enable vnstat >/dev/null 2>&1 || true
 systemctl restart vnstat >/dev/null 2>&1 || true
 success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
+
+# ═══════════════════════════════════════════
+# SECTION 6c0 — SLOWDNS (dnstt) — installed OFF, activated from the menu
+#   SlowDNS tunnels SSH over DNS on port 53. It stays inactive until the
+#   user sets an NS record and activates it from the panel.
+# ═══════════════════════════════════════════
+info "Preparing SlowDNS (DNS tunnel on port 53)..."
+mkdir -p /etc/slowdns
+SDNS_DIR=/etc/slowdns
+SDNS_BIN=/usr/local/bin/dns-server
+
+# Fetch the dnstt server binary (best-effort; can also be installed later on activation).
+if [ ! -x "$SDNS_BIN" ]; then
+    curl -sL -o "$SDNS_BIN" "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/dns-server" 2>/dev/null \
+        && chmod +x "$SDNS_BIN" 2>/dev/null || true
+fi
+
+# Generate the DNSTT keypair once (public key is shared with clients).
+if [ ! -f "$SDNS_DIR/server.key" ] && [ -x "$SDNS_BIN" ]; then
+    "$SDNS_BIN" -gen-key -privkey-file "$SDNS_DIR/server.key" -pubkey-file "$SDNS_DIR/server.pub" >/dev/null 2>&1 || true
+fi
+
+# systemd unit — reads the NS domain from /etc/slowdns/ns.conf, tunnels to Dropbear on 109.
+cat > /etc/systemd/system/slowdns.service <<'SDEOF'
+[Unit]
+Description=SlowDNS (DNS tunnel) server
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/slowdns/ns.conf
+ExecStart=/usr/local/bin/dns-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS} 127.0.0.1:109
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SDEOF
+systemctl daemon-reload >/dev/null 2>&1 || true
+success "SlowDNS prepared (activate it from the menu after setting an NS record)"
 
 # ═══════════════════════════════════════════
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
@@ -970,6 +1012,98 @@ service_status() {
     pause
 }
 
+SDNS_DIR=/etc/slowdns
+SDNS_BIN=/usr/local/bin/dns-server
+SDNS_NSF=/etc/slowdns/ns.conf
+
+slowdns_menu() {
+    while true; do
+        section "SLOWDNS (DNS TUNNEL · PORT 53)" "$TEAL"
+        local col="$TEAL" st ns pub
+        if [ ! -x "$SDNS_BIN" ]; then st="${R}✗ binary missing${NC}"
+        elif systemctl is-active --quiet slowdns 2>/dev/null; then st="${G}● active${NC}"
+        else st="${Y}○ inactive${NC}"; fi
+        ns=$(. "$SDNS_NSF" 2>/dev/null; echo "$NS")
+        pub=$(cat "$SDNS_DIR/server.pub" 2>/dev/null)
+        line_top "$col"
+        row "$col" "${GR}STATUS${NC}  ${st}"
+        row "$col" "${GR}NS${NC}      ${Y}${ns:-<not set>}${NC}"
+        row "$col" "${GR}TUNNEL${NC}  ${C}DNS :53 → SSH (Dropbear 109)${NC}"
+        line_bot "$col"
+        if [ -n "$pub" ]; then
+            echo ""
+            echo -e "  ${C}Public key (give to clients):${NC}"
+            echo -e "  ${W}${pub}${NC}"
+        fi
+        echo ""
+        menu_item "1" "🌐" "Set NS record & activate"   "$LIME"
+        menu_item "2" "▶ " "Start SlowDNS"              "$G"
+        menu_item "3" "⏹ " "Stop SlowDNS"               "$Y"
+        menu_item "4" "🔑" "Show public key / details"  "$SKY"
+        menu_item "0" "↩ " "Back to main menu"          "$GR"
+        echo ""
+        read -rp "$(echo -e "  ${P}❯${NC} select : ")" o
+        case "$o" in
+            1) slowdns_setup ;;
+            2) systemctl enable slowdns >/dev/null 2>&1; systemctl start slowdns >/dev/null 2>&1
+               sleep 1
+               if systemctl is-active --quiet slowdns; then ok "SlowDNS started."; else err "Failed to start — set an NS record first (option 1)."; fi; sleep 1 ;;
+            3) systemctl stop slowdns >/dev/null 2>&1; ok "SlowDNS stopped."; sleep 1 ;;
+            4) slowdns_info ;;
+            0) break ;;
+            *) err "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
+slowdns_setup() {
+    section "SLOWDNS — SET NS RECORD" "$TEAL"
+    echo -e "  ${GR}On your DNS provider, create these two records:${NC}"
+    echo -e "    ${W}A${NC}   record:  ${Y}dns.${DOMAIN:-yourdomain}${NC}  →  ${Y}${SERVER_IP}${NC}"
+    echo -e "    ${W}NS${NC}  record:  ${Y}slow.${DOMAIN:-yourdomain}${NC} →  ${Y}dns.${DOMAIN:-yourdomain}${NC}"
+    echo ""
+    echo -e "  ${GR}Then enter the NS hostname (e.g. slow.${DOMAIN:-yourdomain}).${NC}"
+    read -rp "$(echo -e "  ${C}NS domain${NC} : ")" NSVAL
+    NSVAL=$(echo "$NSVAL" | tr -d '[:space:]')
+    [ -z "$NSVAL" ] && { err "No NS entered."; pause; return; }
+    if [ ! -x "$SDNS_BIN" ]; then
+        note "Downloading SlowDNS server binary..."
+        curl -sL -o "$SDNS_BIN" "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/dns-server" 2>/dev/null && chmod +x "$SDNS_BIN"
+        [ -x "$SDNS_BIN" ] || { err "Download failed — check server internet."; pause; return; }
+    fi
+    if [ ! -f "$SDNS_DIR/server.key" ]; then
+        "$SDNS_BIN" -gen-key -privkey-file "$SDNS_DIR/server.key" -pubkey-file "$SDNS_DIR/server.pub" >/dev/null 2>&1
+    fi
+    echo "NS=$NSVAL" > "$SDNS_NSF"
+    command -v ufw >/dev/null 2>&1 && { ufw allow 53/udp >/dev/null 2>&1; ufw allow 53/tcp >/dev/null 2>&1; }
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable slowdns >/dev/null 2>&1
+    systemctl restart slowdns >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet slowdns; then
+        ok "SlowDNS ${G}ACTIVE${NC} on NS ${W}${NSVAL}${NC}."
+    else
+        err "SlowDNS failed to start — check: journalctl -u slowdns"
+    fi
+    slowdns_info
+}
+
+slowdns_info() {
+    section "SLOWDNS — CLIENT DETAILS" "$SKY"
+    local ns pub col="$SKY"
+    ns=$(. "$SDNS_NSF" 2>/dev/null; echo "$NS")
+    pub=$(cat "$SDNS_DIR/server.pub" 2>/dev/null)
+    line_top "$col"
+    row "$col" "${GR}NS domain${NC}  ${Y}${ns:-<not set>}${NC}"
+    row "$col" "${GR}Server IP${NC}  ${Y}${SERVER_IP}${NC}"
+    row "$col" "${GR}SSH port${NC}   ${C}109 (Dropbear)${NC}"
+    line_bot "$col"
+    echo ""
+    echo -e "  ${C}Public key:${NC}"
+    echo -e "  ${W}${pub:-<none — activate first>}${NC}"
+    pause
+}
+
 restart_services() {
     section "RESTART ALL SERVICES" "$ORANGE"
     note "Restarting services, please wait..."
@@ -977,6 +1111,7 @@ restart_services() {
     systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
     systemctl restart stunnel4 2>/dev/null
+    systemctl is-enabled --quiet slowdns 2>/dev/null && systemctl restart slowdns 2>/dev/null
     ok "All services restarted."
     pause
 }
@@ -1351,7 +1486,8 @@ while true; do
     menu_item "7" "📊" "Service status"           "$C"
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
-    menu_item "10" "🔄" "Restart all services"    "$Y"
+    menu_item "10" "🕳 " "SlowDNS (DNS tunnel)"    "$TEAL"
+    menu_item "11" "🔄" "Restart all services"    "$Y"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1365,7 +1501,8 @@ while true; do
         7) service_status ;;
         8) bandwidth ;;
         9) xray_menu ;;
-        10) restart_services ;;
+        10) slowdns_menu ;;
+        11) restart_services ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
@@ -1391,6 +1528,7 @@ echo -e "    SSL + payload (TLS)  → 443"
 echo -e "    SSL direct SSH (TLS) → 447"
 echo -e "    OpenSSH              → 22"
 echo -e "    Dropbear             → 109, 143"
+echo -e "    SlowDNS (DNS tunnel) → 53/udp (set NS via: menu → 10)"
 echo ""
 echo -e "  ${BCyan}Client tips:${NC}"
 echo -e "    WebSocket payload : GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
