@@ -1,20 +1,21 @@
 #!/bin/bash
 # =============================================================
-# SSH & SSH-SSL SERVER SETUP + MANAGEMENT PANEL
+# SSH + WEBSOCKET + SSL VPN SERVER SETUP + MANAGEMENT PANEL
 #
-# Installs: OpenSSH, Dropbear, Stunnel (SSH-SSL), and a
-# WebSocket-to-SSH proxy. Then installs a "menu" command that
-# opens a management panel to create/delete SSH users.
+# Working payload/SSL layout (HTTP Injector / HTTP Custom style):
 #
-# Ports:
-#   80   — Dropbear (main SSH)
-#   109  — Dropbear (alt)
-#   143  — Dropbear (alt)
-#   443  — Dropbear over SSL (Stunnel → :80)
-#   22   — OpenSSH
-#   447  — OpenSSH over SSL  (Stunnel → :22)
-#   444  — WebSocket over SSL (Stunnel → :8880)
-#   8880 — SSH over WebSocket (ws-proxy → Dropbear:109)
+#   80   — WebSocket / SSH proxy  (payload -> 101 -> SSH)
+#   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (SSL payload)
+#   447  — SSL/TLS  (stunnel) -> OpenSSH direct
+#   22   — OpenSSH  (management / direct)
+#   109  — Dropbear (direct)
+#   143  — Dropbear (direct alt)
+#
+# The port-80 proxy is DUAL MODE:
+#   * If the client sends an HTTP/WebSocket payload, it replies
+#     "HTTP/1.1 101 Switching Protocols" then tunnels to SSH.
+#   * If the client speaks raw SSH (no payload), it tunnels directly.
+#   This makes it work with WebSocket payloads AND plain SSH.
 #
 # Usage:
 #   chmod +x ssh-ssl-setup.sh
@@ -23,23 +24,16 @@
 
 set -e
 
-# ─── Colour helpers ──────────────────────────────────────────
-BGreen='\033[1;32m'
-BYellow='\033[1;33m'
-BCyan='\033[1;36m'
-BRed='\033[1;31m'
-BPurple='\033[1;35m'
-NC='\033[0m'
+BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
+BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
 
 info()    { echo -e "${BCyan}[*] $*${NC}"; }
 success() { echo -e "${BGreen}[✓] $*${NC}"; }
 warn()    { echo -e "${BYellow}[!] $*${NC}"; }
 error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
-# ─── Root check ──────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
 
-# ─── Config directory ────────────────────────────────────────
 CONF_DIR=/etc/ssh-panel
 mkdir -p "$CONF_DIR"
 STUNNEL_CERT=/etc/stunnel/stunnel.pem
@@ -49,7 +43,7 @@ STUNNEL_CERT=/etc/stunnel/stunnel.pem
 # ═══════════════════════════════════════════
 clear
 echo -e "${BGreen}============================================${NC}"
-echo -e "${BCyan}      SSH & SSH-SSL SERVER INSTALLER         ${NC}"
+echo -e "${BCyan}    SSH + WEBSOCKET + SSL VPN INSTALLER      ${NC}"
 echo -e "${BGreen}============================================${NC}"
 echo ""
 echo -e "${BYellow}Enter your domain name (pointed at this server's IP).${NC}"
@@ -58,7 +52,7 @@ echo ""
 read -rp "  Domain: " DOMAIN
 DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
 
-# Detect the server's public IP for display later
+apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
@@ -66,7 +60,7 @@ echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
 if [ -n "$DOMAIN" ]; then
     echo -e "\n${BGreen}Using domain:${NC} $DOMAIN"
 else
-    echo -e "\n${BYellow}No domain entered — a self-signed certificate will be used.${NC}"
+    echo -e "\n${BYellow}No domain — a self-signed certificate will be used.${NC}"
 fi
 sleep 1
 
@@ -90,12 +84,12 @@ apt-get update -y </dev/null >/dev/null 2>&1
 
 echo ""
 echo -e "${BGreen}============================================${NC}"
-echo -e "${BCyan}      INSTALLING SSH & SSL PROTOCOLS         ${NC}"
+echo -e "${BCyan}     INSTALLING VPN PROTOCOLS                ${NC}"
 echo -e "${BGreen}============================================${NC}"
 echo ""
 
 # ═══════════════════════════════════════════
-# SECTION 1 — OPENSSH HARDENING
+# SECTION 1 — OPENSSH
 # ═══════════════════════════════════════════
 info "Installing & configuring OpenSSH..."
 eval "$APT openssh-server curl" </dev/null >/dev/null 2>&1
@@ -115,11 +109,11 @@ apply_sshd_setting() {
 apply_sshd_setting "Port"                    "22"
 apply_sshd_setting "PermitRootLogin"         "yes"
 apply_sshd_setting "PasswordAuthentication"  "yes"
-apply_sshd_setting "X11Forwarding"           "no"
-apply_sshd_setting "MaxAuthTries"            "6"
-apply_sshd_setting "ClientAliveInterval"     "60"
-apply_sshd_setting "ClientAliveCountMax"     "3"
 apply_sshd_setting "AllowTcpForwarding"      "yes"
+apply_sshd_setting "GatewayPorts"            "yes"
+apply_sshd_setting "PermitTunnel"            "yes"
+apply_sshd_setting "ClientAliveInterval"     "30"
+apply_sshd_setting "ClientAliveCountMax"     "6"
 apply_sshd_setting "UseDNS"                  "no"
 
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
@@ -127,9 +121,9 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 success "OpenSSH configured on port 22"
 
 # ═══════════════════════════════════════════
-# SECTION 2 — DROPBEAR
+# SECTION 2 — DROPBEAR (direct SSH targets)
 # ═══════════════════════════════════════════
-info "Installing Dropbear (main port 80, extras 109 & 143)..."
+info "Installing Dropbear (ports 109 & 143)..."
 eval "$APT dropbear" </dev/null >/dev/null 2>&1
 
 mkdir -p /etc/dropbear
@@ -138,43 +132,64 @@ for TYPE in dss rsa ecdsa ed25519; do
     [ -f "$KEYFILE" ] || dropbearkey -t "$TYPE" -f "$KEYFILE" >/dev/null 2>&1 || true
 done
 
+# Dropbear (and OpenSSH) accept tunnel-only accounts whose shell is /bin/false.
 grep -qxF '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells
 grep -qxF '/usr/sbin/nologin' /etc/shells || echo '/usr/sbin/nologin' >> /etc/shells
 
 cat > /etc/default/dropbear <<'EOF'
 NO_START=0
-DROPBEAR_PORT=80
-DROPBEAR_EXTRA_ARGS="-p 109 -p 143 -I 60 -K 30"
+DROPBEAR_PORT=109
+DROPBEAR_EXTRA_ARGS="-p 143 -I 300 -K 30"
 DROPBEAR_BANNER=""
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
 
 systemctl enable dropbear >/dev/null 2>&1 || true
 systemctl restart dropbear
-success "Dropbear running on ports 80, 109 and 143"
+success "Dropbear running on ports 109 and 143"
 
 # ═══════════════════════════════════════════
-# SECTION 3 — WEBSOCKET → SSH PROXY
+# SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
 # ═══════════════════════════════════════════
-info "Installing Python WebSocket-to-SSH proxy (port 8880)..."
+info "Installing dual-mode WebSocket/SSH proxy (port 80)..."
 
 cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
-"""WebSocket-to-SSH bridge: 0.0.0.0:8880 -> Dropbear 127.0.0.1:109."""
+"""
+Dual-mode WebSocket/SSH proxy.
+
+Listens on 0.0.0.0:80. For each connection it peeks at the first bytes:
+
+  * If the client speaks SSH directly (data begins with "SSH-"), the
+    connection is tunnelled straight to the backend SSH server.
+  * Otherwise the data is treated as an HTTP/WebSocket payload: the
+    proxy replies "HTTP/1.1 101 Switching Protocols" and then tunnels
+    to SSH. This is what VPN apps (HTTP Injector, HTTP Custom, etc.)
+    expect for a WebSocket payload.
+  * If nothing arrives quickly, it assumes a direct SSH client that is
+    waiting for the server banner and tunnels straight through.
+
+Backend SSH = Dropbear on 127.0.0.1:109.
+"""
 import socket
 import threading
 
-TARGET_HOST = '127.0.0.1'
-TARGET_PORT = 109
-LISTEN_HOST = '0.0.0.0'
-LISTEN_PORT = 8880
-HANDSHAKE_TIMEOUT = 15
+BACKEND_HOST = '127.0.0.1'
+BACKEND_PORT = 109
+LISTEN_HOST  = '0.0.0.0'
+LISTEN_PORT  = 80
+PEEK_TIMEOUT = 3          # seconds to wait for an initial payload
+RESPONSE = (
+    b"HTTP/1.1 101 Switching Protocols\r\n"
+    b"Upgrade: websocket\r\n"
+    b"Connection: Upgrade\r\n\r\n"
+)
 
 
-def forward(src, dst):
+def pipe(src, dst):
     try:
         while True:
-            data = src.recv(8192)
+            data = src.recv(65536)
             if not data:
                 break
             dst.sendall(data)
@@ -183,53 +198,96 @@ def forward(src, dst):
     finally:
         for s in (src, dst):
             try:
-                s.close()
+                s.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
-
-
-def handle_client(client):
-    client.settimeout(HANDSHAKE_TIMEOUT)
-    ssh = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    ssh.settimeout(HANDSHAKE_TIMEOUT)
-    try:
-        ssh.connect((TARGET_HOST, TARGET_PORT))
-        buf = b""
-        while b"\r\n\r\n" not in buf:
-            chunk = client.recv(1)
-            if not chunk:
-                return
-            buf += chunk
-        client.sendall(
-            b"HTTP/1.1 101 Switching Protocols\r\n"
-            b"Upgrade: websocket\r\n"
-            b"Connection: Upgrade\r\n\r\n"
-        )
-        client.settimeout(None)
-        ssh.settimeout(None)
-        t1 = threading.Thread(target=forward, args=(client, ssh), daemon=True)
-        t2 = threading.Thread(target=forward, args=(ssh, client), daemon=True)
-        t1.start(); t2.start(); t1.join(); t2.join()
-    except Exception:
-        pass
-    finally:
-        for s in (client, ssh):
             try:
                 s.close()
             except Exception:
                 pass
 
 
+def bridge(client, backend, prefix=b""):
+    if prefix:
+        try:
+            backend.sendall(prefix)
+        except Exception:
+            pass
+    t1 = threading.Thread(target=pipe, args=(client, backend), daemon=True)
+    t2 = threading.Thread(target=pipe, args=(backend, client), daemon=True)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+
+def handle(client):
+    backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        backend.connect((BACKEND_HOST, BACKEND_PORT))
+    except Exception:
+        client.close()
+        return
+
+    first = b""
+    try:
+        client.settimeout(PEEK_TIMEOUT)
+        first = client.recv(4096)
+    except socket.timeout:
+        first = b""
+    except Exception:
+        client.close(); backend.close(); return
+    finally:
+        try:
+            client.settimeout(None)
+        except Exception:
+            pass
+
+    # Direct SSH client: forward the bytes we already read.
+    if first.startswith(b"SSH-") or first == b"":
+        try:
+            bridge(client, backend, prefix=first)
+        finally:
+            client.close(); backend.close()
+        return
+
+    # HTTP / WebSocket payload: read the rest of the request headers,
+    # then answer with a 101 upgrade and tunnel to SSH.
+    buf = first
+    try:
+        client.settimeout(PEEK_TIMEOUT)
+        while b"\r\n\r\n" not in buf and len(buf) < 8192:
+            more = client.recv(4096)
+            if not more:
+                break
+            buf += more
+    except Exception:
+        pass
+    finally:
+        try:
+            client.settimeout(None)
+        except Exception:
+            pass
+
+    try:
+        client.sendall(RESPONSE)
+    except Exception:
+        client.close(); backend.close(); return
+
+    try:
+        bridge(client, backend)
+    finally:
+        client.close(); backend.close()
+
+
 def main():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((LISTEN_HOST, LISTEN_PORT))
-    srv.listen(5000)
-    print("ws-proxy on %s:%d -> %s:%d" % (LISTEN_HOST, LISTEN_PORT, TARGET_HOST, TARGET_PORT))
+    srv.listen(1024)
+    print("dual-mode proxy on %s:%d -> SSH %s:%d" %
+          (LISTEN_HOST, LISTEN_PORT, BACKEND_HOST, BACKEND_PORT))
     while True:
         try:
             client, _ = srv.accept()
-            threading.Thread(target=handle_client, args=(client,), daemon=True).start()
+            threading.Thread(target=handle, args=(client,), daemon=True).start()
         except Exception:
             pass
 
@@ -242,7 +300,7 @@ chmod +x /usr/local/bin/ws-proxy.py
 
 cat > /etc/systemd/system/ws-proxy.service <<'EOF'
 [Unit]
-Description=WebSocket-to-SSH proxy (port 8880 -> Dropbear 109)
+Description=Dual-mode WebSocket/SSH proxy (port 80 -> Dropbear 109)
 After=network.target dropbear.service
 
 [Service]
@@ -250,15 +308,16 @@ Type=simple
 User=root
 ExecStart=/usr/bin/python3 /usr/local/bin/ws-proxy.py
 Restart=always
-RestartSec=5
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now ws-proxy >/dev/null 2>&1
-success "WebSocket-SSH proxy running on port 8880"
+systemctl enable ws-proxy >/dev/null 2>&1
+# (started after the certificate step, which needs port 80 for certbot)
+success "WebSocket/SSH proxy installed (port 80)"
 
 # ═══════════════════════════════════════════
 # SECTION 4 — SSL CERTIFICATE
@@ -267,13 +326,14 @@ info "Setting up SSL certificate..."
 eval "$APT stunnel4 openssl" </dev/null >/dev/null 2>&1
 mkdir -p /etc/stunnel
 
+# Make sure nothing is holding port 80 while certbot validates.
+systemctl stop ws-proxy 2>/dev/null || true
+systemctl stop nginx 2>/dev/null || true
+systemctl stop apache2 2>/dev/null || true
+
 if [ -n "$DOMAIN" ]; then
     info "Requesting Let's Encrypt certificate for $DOMAIN ..."
     eval "$APT certbot" </dev/null >/dev/null 2>&1 || true
-    systemctl stop nginx 2>/dev/null || true
-    systemctl stop apache2 2>/dev/null || true
-    # Dropbear holds port 80; free it so certbot can validate the domain
-    systemctl stop dropbear 2>/dev/null || true
     certbot certonly --standalone -d "$DOMAIN" \
         --non-interactive --agree-tos \
         --register-unsafely-without-email >/dev/null 2>&1 && LE_OK=1 || LE_OK=0
@@ -291,8 +351,8 @@ fi
 
 if [ -z "$DOMAIN" ] || [ ! -f "$STUNNEL_CERT" ]; then
     warn "Generating self-signed certificate..."
-    openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 \
-        -subj "/C=US/ST=NA/L=NA/O=SSHServer/CN=ssh-server" \
+    openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+        -subj "/C=US/ST=NA/L=NA/O=VPN/CN=vpn-server" \
         -out "$STUNNEL_CERT" -keyout /etc/stunnel/stunnel.key >/dev/null 2>&1
     cat /etc/stunnel/stunnel.key >> "$STUNNEL_CERT"
     rm -f /etc/stunnel/stunnel.key
@@ -300,51 +360,52 @@ if [ -z "$DOMAIN" ] || [ ! -f "$STUNNEL_CERT" ]; then
 fi
 chmod 600 "$STUNNEL_CERT"
 
+# Port 80 is free again — start the proxy.
+systemctl start ws-proxy >/dev/null 2>&1 || true
+
 # ═══════════════════════════════════════════
-# SECTION 5 — STUNNEL (SSH-SSL)
+# SECTION 5 — STUNNEL (SSL / TLS)
+#   443 -> WebSocket proxy (SSL + payload)
+#   447 -> OpenSSH direct  (plain SSL)
 # ═══════════════════════════════════════════
-info "Configuring Stunnel SSL tunnels..."
+info "Configuring Stunnel (SSL on 443 & 447)..."
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || true
 
 cat > /etc/stunnel/stunnel.conf <<EOF
-pid     = /var/run/stunnel.pid
+pid     = /var/run/stunnel4.pid
 cert    = ${STUNNEL_CERT}
 client  = no
 socket  = a:SO_REUSEADDR=1
 socket  = l:TCP_NODELAY=1
 socket  = r:TCP_NODELAY=1
+TIMEOUTclose = 0
 
-[dropbear-ssl]
+; SSL + WebSocket payload: TLS on 443 -> dual-mode proxy on 80 -> SSH
+[ssl-ws]
 accept  = 443
 connect = 127.0.0.1:80
 
-[ssh-ssl]
+; Plain SSL to OpenSSH: TLS on 447 -> OpenSSH 22
+[ssl-ssh]
 accept  = 447
 connect = 127.0.0.1:22
-
-[wss-bypass]
-accept  = 444
-connect = 127.0.0.1:8880
 EOF
 
 systemctl enable stunnel4 >/dev/null 2>&1 || true
 systemctl restart stunnel4 >/dev/null 2>&1
-success "Stunnel running — dropbear-ssl:443 | ssh-ssl:447 | wss-ssl:444"
-
-# Ensure Dropbear is back up (it was stopped for cert issuance)
-systemctl restart dropbear >/dev/null 2>&1 || true
+success "Stunnel running — SSL 443 (payload) & 447 (direct SSH)"
 
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
 # ═══════════════════════════════════════════
 info "Opening firewall ports..."
 if command -v ufw >/dev/null 2>&1; then
-    for P in 22 80 109 143 443 444 447 8880; do
+    for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
     success "UFW rules applied"
 else
-    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 444 447 8880"
+    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447"
 fi
 
 # ═══════════════════════════════════════════
@@ -354,10 +415,7 @@ info "Installing management panel (menu command)..."
 
 cat > /usr/local/bin/menu <<'MENUEOF'
 #!/bin/bash
-# =============================================================
-# SSH SERVER MANAGEMENT PANEL
-# Type "menu" any time to open this panel.
-# =============================================================
+# SSH VPN MANAGEMENT PANEL — type "menu" to open.
 
 BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
 BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
@@ -371,7 +429,15 @@ HOST_DISPLAY="${DOMAIN:-$SERVER_IP}"
 
 pause() { echo ""; read -rp "Press ENTER to return to the menu..." _; }
 
-# ─── Create an SSH user ──────────────────────────────────────
+show_ports() {
+    echo -e "  ${BPurple}CONNECTION PORTS${NC}"
+    echo -e "  WebSocket (payload) : ${HOST_DISPLAY}:80"
+    echo -e "  SSL + payload (TLS) : ${HOST_DISPLAY}:443"
+    echo -e "  SSL direct SSH      : ${HOST_DISPLAY}:447"
+    echo -e "  OpenSSH             : ${HOST_DISPLAY}:22"
+    echo -e "  Dropbear            : ${HOST_DISPLAY}:109 / 143"
+}
+
 create_user() {
     clear
     echo -e "${BGreen}=========== CREATE SSH USER ===========${NC}"
@@ -384,10 +450,8 @@ create_user() {
     [ -z "$PASSWORD" ] && { echo -e "${BRed}Password cannot be empty.${NC}"; pause; return; }
     read -rp "  Days valid      : " DAYS
     [[ ! "$DAYS" =~ ^[0-9]+$ ]] && DAYS=30
-
     EXP_DATE=$(date -d "+$DAYS days" +"%Y-%m-%d")
 
-    # Create a shell-less user (VPN/tunnel only, cannot open a real shell)
     useradd -e "$EXP_DATE" -M -s /bin/false "$USERNAME"
     echo -e "${PASSWORD}\n${PASSWORD}" | passwd "$USERNAME" >/dev/null 2>&1
 
@@ -400,18 +464,16 @@ create_user() {
     echo -e "  Password      : ${BYellow}${PASSWORD}${NC}"
     echo -e "  Expires on    : ${BYellow}${EXP_DATE}${NC}  (${DAYS} days)"
     echo -e "${BGreen}-----------------------------------------${NC}"
-    echo -e "  ${BPurple}CONNECTION PORTS${NC}"
-    echo -e "  Dropbear            : ${HOST_DISPLAY}:80 / 109 / 143"
-    echo -e "  Dropbear over SSL   : ${HOST_DISPLAY}:443"
-    echo -e "  OpenSSH             : ${HOST_DISPLAY}:22"
-    echo -e "  OpenSSH over SSL    : ${HOST_DISPLAY}:447"
-    echo -e "  SSH over WebSocket  : ws://${HOST_DISPLAY}:8880"
-    echo -e "  SSH over WSS (TLS)  : wss://${HOST_DISPLAY}:444"
+    show_ports
+    echo -e "${BGreen}-----------------------------------------${NC}"
+    echo -e "  ${BPurple}SAMPLE WEBSOCKET PAYLOAD${NC}"
+    echo -e "  GET / HTTP/1.1[crlf]Host: ${HOST_DISPLAY}[crlf]"
+    echo -e "  Upgrade: websocket[crlf][crlf]"
+    echo -e "  ${BPurple}SSL/SNI host${NC} : ${HOST_DISPLAY}"
     echo -e "${BGreen}=========================================${NC}"
     pause
 }
 
-# ─── Delete an SSH user ──────────────────────────────────────
 delete_user() {
     clear
     echo -e "${BGreen}=========== DELETE SSH USER ===========${NC}"
@@ -425,18 +487,14 @@ delete_user() {
     pause
 }
 
-# ─── List SSH users ──────────────────────────────────────────
 list_users() {
     clear
     echo -e "${BGreen}=========== SSH USER LIST ===========${NC}"
     printf "  %-20s %-12s %-8s\n" "USERNAME" "EXPIRES" "STATUS"
     echo   "  -------------------------------------------"
-    # Managed users are shell-less (/bin/false or /usr/sbin/nologin)
     while IFS=: read -r user _ uid _ _ _ shell; do
         if [ "$uid" -ge 1000 ] && { [ "$shell" = "/bin/false" ] || [ "$shell" = "/usr/sbin/nologin" ]; }; then
             EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
-            [ "$EXP" = "never" ] && EXP="never"
-            # Convert to short date if possible
             EXP_SHORT=$(date -d "$EXP" +"%Y-%m-%d" 2>/dev/null || echo "$EXP")
             if pgrep -u "$user" >/dev/null 2>&1; then STATUS="online"; else STATUS="offline"; fi
             printf "  %-20s %-12s %-8s\n" "$user" "$EXP_SHORT" "$STATUS"
@@ -445,7 +503,6 @@ list_users() {
     pause
 }
 
-# ─── Show online users ───────────────────────────────────────
 online_users() {
     clear
     echo -e "${BGreen}=========== ONLINE USERS ===========${NC}"
@@ -460,7 +517,6 @@ online_users() {
     pause
 }
 
-# ─── Change a user's password ────────────────────────────────
 change_password() {
     clear
     echo -e "${BGreen}======== CHANGE PASSWORD ========${NC}"
@@ -475,7 +531,6 @@ change_password() {
     pause
 }
 
-# ─── Renew (extend) an account ───────────────────────────────
 renew_user() {
     clear
     echo -e "${BGreen}======== RENEW ACCOUNT ========${NC}"
@@ -491,7 +546,6 @@ renew_user() {
     pause
 }
 
-# ─── Service status ──────────────────────────────────────────
 service_status() {
     clear
     echo -e "${BGreen}======== SERVICE STATUS ========${NC}"
@@ -503,15 +557,13 @@ service_status() {
         fi
     done
     echo ""
-    echo -e "  ${BCyan}Ports:${NC} 80/109/143 (dropbear) 443 (dropbear-ssl)"
-    echo -e "         22 (ssh) 447 (ssh-ssl) 444 (wss) 8880 (ws)"
+    show_ports
     pause
 }
 
-# ─── Restart all services ────────────────────────────────────
 restart_services() {
     clear
-    echo -e "${BYellow}Restarting all SSH/SSL services...${NC}"
+    echo -e "${BYellow}Restarting all services...${NC}"
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
     systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
@@ -520,11 +572,10 @@ restart_services() {
     pause
 }
 
-# ─── Main menu loop ──────────────────────────────────────────
 while true; do
     clear
     echo -e "${BGreen}==================================================${NC}"
-    echo -e "${BCyan}            SSH SERVER MANAGEMENT PANEL           ${NC}"
+    echo -e "${BCyan}            SSH VPN MANAGEMENT PANEL              ${NC}"
     echo -e "${BGreen}==================================================${NC}"
     echo -e "   Host   : ${BYellow}${HOST_DISPLAY}${NC}"
     echo -e "${BGreen}--------------------------------------------------${NC}"
@@ -568,14 +619,17 @@ echo ""
 echo -e "  Host / Domain : ${BYellow}${DOMAIN:-$SERVER_IP}${NC}"
 echo ""
 echo -e "  ${BCyan}Installed services & ports:${NC}"
-echo -e "    Dropbear           → 80, 109, 143"
-echo -e "    Dropbear over SSL  → 443"
-echo -e "    OpenSSH            → 22"
-echo -e "    OpenSSH over SSL   → 447"
-echo -e "    SSH over WebSocket → 8880"
-echo -e "    SSH over WSS (TLS) → 444"
+echo -e "    WebSocket (payload)  → 80"
+echo -e "    SSL + payload (TLS)  → 443"
+echo -e "    SSL direct SSH (TLS) → 447"
+echo -e "    OpenSSH              → 22"
+echo -e "    Dropbear             → 109, 143"
+echo ""
+echo -e "  ${BCyan}Client tips:${NC}"
+echo -e "    WebSocket payload : GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
+echo -e "    SSL/SNI host      : ${DOMAIN:-$SERVER_IP}"
 echo ""
 echo -e "${BGreen}============================================================${NC}"
-echo -e "${BYellow}   Type ${BGreen}menu${BYellow} to open the management panel and create users.${NC}"
+echo -e "${BYellow}   Type ${BGreen}menu${BYellow} to open the panel and create users.${NC}"
 echo -e "${BGreen}============================================================${NC}"
 echo ""
