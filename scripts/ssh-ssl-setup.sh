@@ -682,7 +682,15 @@ HOST_DISPLAY="${DOMAIN:-$SERVER_IP}"
 
 [[ $EUID -ne 0 ]] && { echo -e "${R}Run as root: sudo menu${NC}"; exit 1; }
 
-WIDTH=60   # inner width of the frames
+# Use a UTF-8 locale so box/symbol characters are measured correctly.
+if locale -a 2>/dev/null | grep -qiE '^C\.utf-?8$'; then export LC_ALL=C.UTF-8; fi
+
+# Frame width adapts to the terminal so boxes never wrap on phones.
+COLS=$(tput cols 2>/dev/null || stty size 2>/dev/null | awk '{print $2}')
+[ -z "$COLS" ] && COLS=64
+WIDTH=$(( COLS - 4 ))          # inner width of the frames
+(( WIDTH > 60 )) && WIDTH=60
+(( WIDTH < 34 )) && WIDTH=34
 
 # ── frame drawing helpers ───────────────────────────────
 # strip ANSI codes to measure real text length
