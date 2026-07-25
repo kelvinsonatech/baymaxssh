@@ -1063,10 +1063,19 @@ xray_443() {
         read -rp "$(echo -e "  ${C}Restore SSL-payload SSH on 443?${NC} ${GR}(y/N)${NC} : ")" a
         if [[ "$a" =~ ^[Yy] ]]; then
             rm -f "$XP443F"
+            # Order matters: Xray must RELEASE 443 before stunnel can bind it.
+            rebuild_config; systemctl restart xray >/dev/null 2>&1
+            sleep 1
             write_stunnel_conf yes
             systemctl restart stunnel4 >/dev/null 2>&1
-            rebuild_config; systemctl restart xray >/dev/null 2>&1
-            ok "Port 443 restored to ${G}SSL-payload SSH${NC}."
+            sleep 1
+            if ss -ltn 2>/dev/null | grep -q ':443 '; then
+                ok "Port 443 restored to ${G}SSL-payload SSH${NC}."
+            else
+                err "stunnel didn't bind 443 — retrying..."; systemctl restart stunnel4 >/dev/null 2>&1
+                sleep 1
+                systemctl is-active --quiet stunnel4 && ok "Port 443 restored to ${G}SSL-payload SSH${NC}." || err "stunnel4 failed — check: journalctl -u stunnel4"
+            fi
         else
             note "No change."
         fi
@@ -1079,8 +1088,10 @@ xray_443() {
         case "$pc" in 1) proto=vmess;; 2) proto=vless;; 3) proto=trojan;; *) note "Cancelled."; pause; return;; esac
         if ! xray_install; then err "Xray must be installed first — create an account."; pause; return; fi
         echo "$proto" > "$XP443F"
+        # Order matters: stunnel must RELEASE 443 before Xray can bind it.
         write_stunnel_conf no
         systemctl restart stunnel4 >/dev/null 2>&1
+        sleep 1
         rebuild_config
         systemctl enable xray >/dev/null 2>&1; systemctl restart xray >/dev/null 2>&1
         sleep 1
