@@ -512,48 +512,69 @@ cat > /usr/local/bin/slowdns-fetch <<'SFEOF'
 #!/bin/bash
 SDNS_BIN=/usr/local/bin/dns-server
 is_elf() { [ -f "$1" ] && [ "$(head -c4 "$1" 2>/dev/null | tr -d '\0')" = "$(printf 'ELF')" ]; }
+runnable() { "$1" -gen-key -privkey-file /dev/null -pubkey-file /dev/null >/dev/null 2>&1; }
 
 # already have a valid, runnable binary?
-if is_elf "$SDNS_BIN" && "$SDNS_BIN" -gen-key -privkey-file /dev/null -pubkey-file /dev/null >/dev/null 2>&1; then
-    exit 0
+if is_elf "$SDNS_BIN" && runnable "$SDNS_BIN"; then exit 0; fi
+
+# --- make sure the server itself has working DNS (a prior activation may have
+#     disabled systemd-resolved's stub and left resolv.conf pointing at it) ----
+if ! getent hosts github.com >/dev/null 2>&1; then
+    echo "  Server DNS is broken — restoring resolvers (1.1.1.1 / 8.8.8.8)..."
+    { echo "nameserver 1.1.1.1"; echo "nameserver 8.8.8.8"; } > /etc/resolv.conf
 fi
 
 ARCH=$(uname -m)
 case "$ARCH" in
-    x86_64|amd64) GOA=amd64; SUF=amd64 ;;
-    aarch64|arm64) GOA=arm64; SUF=arm64 ;;
-    armv7l|armv6l) GOA=arm;   SUF=arm ;;
-    *) GOA=""; SUF="" ;;
+    x86_64|amd64) SUF=amd64 ;;
+    aarch64|arm64) SUF=arm64 ;;
+    armv7l|armv6l) SUF=arm ;;
+    *) SUF="" ;;
 esac
+echo "  CPU architecture: ${ARCH} (${SUF:-unknown})"
 
 # Try prebuilt binaries (arch-matched) from known mirrors; validate each.
 if [ -n "$SUF" ]; then
     for U in \
         "https://github.com/fisabiliyusri/SLOW/raw/main/slowdns/dns-server-$SUF" \
-        "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/dns-server-$SUF"; do
-        curl -sfL -o "$SDNS_BIN.tmp" "$U" 2>/dev/null || continue
+        "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/dns-server-$SUF" \
+        "https://github.com/khaledagn/slowdns/raw/main/dns-server-$SUF"; do
+        echo "  Trying prebuilt: $U"
+        curl -sfL -o "$SDNS_BIN.tmp" "$U" 2>/dev/null || { echo "    (download failed)"; continue; }
         if is_elf "$SDNS_BIN.tmp"; then
             mv "$SDNS_BIN.tmp" "$SDNS_BIN"; chmod +x "$SDNS_BIN"
-            if "$SDNS_BIN" -gen-key -privkey-file /dev/null -pubkey-file /dev/null >/dev/null 2>&1; then exit 0; fi
+            if runnable "$SDNS_BIN"; then echo "  Prebuilt binary OK."; exit 0; fi
+            echo "    (not runnable on this CPU)"
+        else
+            echo "    (not a valid binary)"
         fi
         rm -f "$SDNS_BIN.tmp"
     done
 fi
 
-# Fallback: compile dnstt-server from source (needs Go; install if missing).
+# Fallback: compile dnstt-server from source.
 echo "  Compiling SlowDNS from source (this can take a minute)..."
-if ! command -v go >/dev/null 2>&1; then
-    apt-get install -y golang-go >/dev/null 2>&1
-fi
-command -v go >/dev/null 2>&1 || { echo "  ERROR: Go not available; cannot build."; exit 1; }
+apt-get update -y >/dev/null 2>&1
+apt-get install -y git golang-go ca-certificates >/dev/null 2>&1
+command -v git >/dev/null 2>&1 || { echo "  ERROR: 'git' could not be installed."; exit 1; }
+command -v go  >/dev/null 2>&1 || { echo "  ERROR: 'go' could not be installed."; exit 1; }
+echo "  Using $(go version 2>/dev/null)"
 TMP=$(mktemp -d)
-if git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git "$TMP/dnstt" >/dev/null 2>&1; then
-    ( cd "$TMP/dnstt/dnstt-server" && go build -o "$SDNS_BIN" . >/dev/null 2>&1 )
+CLONED=""
+for REPO in \
+    "https://www.bamsoftware.com/git/dnstt.git" \
+    "https://github.com/kelvinsonatech/dnstt.git"; do
+    echo "  git clone $REPO"
+    if git clone --depth 1 "$REPO" "$TMP/dnstt" 2>"$TMP/git.log"; then CLONED=1; break; fi
+    sed 's/^/    /' "$TMP/git.log"
+done
+if [ -n "$CLONED" ]; then
+    echo "  go build ..."
+    ( cd "$TMP/dnstt/dnstt-server" && GOFLAGS=-mod=mod GO111MODULE=on go build -o "$SDNS_BIN" . ) 2>"$TMP/build.log" \
+        || sed 's/^/    /' "$TMP/build.log"
 fi
 rm -rf "$TMP"
-if is_elf "$SDNS_BIN" && "$SDNS_BIN" -gen-key -privkey-file /dev/null -pubkey-file /dev/null >/dev/null 2>&1; then
-    chmod +x "$SDNS_BIN"; exit 0
-fi
+if is_elf "$SDNS_BIN" && runnable "$SDNS_BIN"; then chmod +x "$SDNS_BIN"; echo "  Built from source OK."; exit 0; fi
 echo "  ERROR: could not obtain a working dns-server binary."; exit 1
 SFEOF
 chmod +x /usr/local/bin/slowdns-fetch
@@ -1153,10 +1174,16 @@ slowdns_free_port53() {
 DNSStubListener=no
 RSVEOF
             # keep working DNS resolution for the server itself
-            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
-            [ -s /etc/resolv.conf ] || echo "nameserver 1.1.1.1" > /etc/resolv.conf
+            if [ -s /run/systemd/resolve/resolv.conf ]; then
+                ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
+            fi
             systemctl restart systemd-resolved >/dev/null 2>&1
             sleep 1
+            # if resolution is still broken, fall back to public resolvers
+            if ! getent hosts github.com >/dev/null 2>&1; then
+                rm -f /etc/resolv.conf
+                { echo "nameserver 1.1.1.1"; echo "nameserver 8.8.8.8"; } > /etc/resolv.conf
+            fi
         fi
     fi
 }
