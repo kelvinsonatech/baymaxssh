@@ -1192,10 +1192,45 @@ xray_activate() {
     xray_paths
     section "CREATE XRAY / V2RAY ACCOUNT" "$PINK"
     if ! xray_install; then err "Xray install failed — check the server's internet."; pause; return; fi
-    echo -e "  ${C}Protocol${NC}"
-    echo -e "    ${LIME}1${NC}) VMess   ${LIME}2${NC}) VLESS   ${LIME}3${NC}) Trojan"
-    read -rp "$(echo -e "  ${P}❯${NC} choose ${GR}(1-3)${NC} : ")" PC
-    case "$PC" in 2) PROTO=vless;; 3) PROTO=trojan;; *) PROTO=vmess;; esac
+    PROTO=""
+    # if accounts already exist, offer to add a client under one of them (same protocol & ports)
+    if [ -s "$XACC" ]; then
+        local rks=() prs=() line i=1 pick p443
+        p443=$(cat "$XP443F" 2>/dev/null)
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            parse_acct "$line"; [ -z "$P_RK" ] && continue
+            rks+=("$P_RK"); prs+=("$P_PROTO")
+        done < "$XACC"
+        if [ ${#rks[@]} -gt 0 ]; then
+            echo -e "  ${C}What do you want to create?${NC}"
+            echo -e "    ${LIME}1${NC}) New account (pick protocol)"
+            echo -e "    ${LIME}2${NC}) Add client under an existing account ${GR}(same protocol & ports)${NC}"
+            read -rp "$(echo -e "  ${P}❯${NC} choose ${GR}(1-2)${NC} : ")" MODE
+            if [ "$MODE" = "2" ]; then
+                echo ""
+                echo -e "  ${C}Existing accounts:${NC}"
+                for i in "${!rks[@]}"; do
+                    local tag=""
+                    [ -n "$p443" ] && [ "${prs[$i]}" = "$p443" ] && tag=" ${P}(on port 443)${NC}"
+                    echo -e "    ${LIME}$((i+1))${NC}) ${W}${rks[$i]}${NC} ${GR}[${prs[$i]}]${NC}${tag}"
+                done
+                read -rp "$(echo -e "  ${P}❯${NC} choose ${GR}(1-${#rks[@]})${NC} : ")" pick
+                if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le ${#rks[@]} ]; then
+                    PROTO="${prs[$((pick-1))]}"
+                    ok "New client will use ${P}${PROTO}${NC} — same ports as '${W}${rks[$((pick-1))]}${NC}'."
+                else
+                    err "Invalid choice."; pause; return
+                fi
+            fi
+        fi
+    fi
+    if [ -z "$PROTO" ]; then
+        echo -e "  ${C}Protocol${NC}"
+        echo -e "    ${LIME}1${NC}) VMess   ${LIME}2${NC}) VLESS   ${LIME}3${NC}) Trojan"
+        read -rp "$(echo -e "  ${P}❯${NC} choose ${GR}(1-3)${NC} : ")" PC
+        case "$PC" in 2) PROTO=vless;; 3) PROTO=trojan;; *) PROTO=vmess;; esac
+    fi
     read -rp "$(echo -e "  ${C}Remark (name)${NC}         : ")" REMARK
     [ -z "$REMARK" ] && REMARK="${PROTO}-$(date +%s)"
     REMARK=$(echo "$REMARK" | tr ' |' '--')
