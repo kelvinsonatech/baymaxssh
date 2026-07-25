@@ -812,6 +812,7 @@ section() {  # section "TITLE" color
 ok()   { echo -e "  ${G}✔${NC} $*"; }
 err()  { echo -e "  ${R}✘${NC} $*"; }
 note() { echo -e "  ${Y}➜${NC} $*"; }
+warn() { echo -e "  ${Y}⚠${NC} $*"; }
 
 create_user() {
     section "CREATE SSH USER" "$LIME"
