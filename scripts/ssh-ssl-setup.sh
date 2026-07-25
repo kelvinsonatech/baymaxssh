@@ -1081,9 +1081,21 @@ xray_443() {
             note "No change."
         fi
     else
-        warn "This DISABLES SSL-payload SSH on 443 completely — SSH-SSL users on 443 will stop working (80/109/143/447 stay up)."
-        echo -e "  ${C}Give 443 to which V2Ray protocol?${NC}"
-        echo -e "    ${LIME}1${NC}) VMess   ${LIME}2${NC}) VLESS   ${LIME}3${NC}) Trojan   ${GR}0${NC}) cancel"
+        local wcol="$ORANGE"
+        line_top "$wcol"
+        crow "$wcol" "${Y}${BOLD}⚠  WARNING${NC}"
+        line_mid "$wcol"
+        row "$wcol" "${W}This disables SSL-payload SSH on port 443.${NC}"
+        row "$wcol" "${GR}443 SSH users stop working · 80/109/143/447 stay up${NC}"
+        line_bot "$wcol"
+        echo ""
+        echo -e "  ${C}${BOLD}Give 443 to which V2Ray protocol?${NC}"
+        echo ""
+        menu_item "1" "⚡" "VMess  (WS-TLS)"  "$LIME"
+        menu_item "2" "⚡" "VLESS  (WS-TLS)"  "$SKY"
+        menu_item "3" "⚡" "Trojan (WS-TLS)"  "$PINK"
+        menu_item "0" "↩ " "Cancel"           "$GR"
+        echo ""
         read -rp "$(echo -e "  ${P}❯${NC} choose : ")" pc
         local proto=""
         case "$pc" in 1) proto=vmess;; 2) proto=vless;; 3) proto=trojan;; *) note "Cancelled."; pause; return;; esac
