@@ -417,179 +417,286 @@ cat > /usr/local/bin/menu <<'MENUEOF'
 #!/bin/bash
 # SSH VPN MANAGEMENT PANEL — type "menu" to open.
 
-BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
-BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
+# ── palette ─────────────────────────────────────────────
+NC='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
+R='\033[1;31m'; G='\033[1;32m'; Y='\033[1;33m'
+B='\033[1;34m'; P='\033[1;35m'; C='\033[1;36m'; W='\033[1;37m'
+GR='\033[0;90m'
+# 256-colour accents
+TEAL='\033[38;5;44m'; ORANGE='\033[38;5;208m'; PINK='\033[38;5;213m'
+LIME='\033[38;5;118m'; SKY='\033[38;5;39m'; VIOLET='\033[38;5;99m'
+
+# Keep legacy names working
+BGreen="$G"; BYellow="$Y"; BCyan="$C"; BRed="$R"; BPurple="$P"
 
 CONF_DIR=/etc/ssh-panel
 DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
 SERVER_IP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
 HOST_DISPLAY="${DOMAIN:-$SERVER_IP}"
 
-[[ $EUID -ne 0 ]] && { echo -e "${BRed}Run as root: sudo menu${NC}"; exit 1; }
+[[ $EUID -ne 0 ]] && { echo -e "${R}Run as root: sudo menu${NC}"; exit 1; }
 
-pause() { echo ""; read -rp "Press ENTER to return to the menu..." _; }
+WIDTH=60   # inner width of the frames
 
-show_ports() {
-    echo -e "  ${BPurple}CONNECTION PORTS${NC}"
-    echo -e "  WebSocket (payload) : ${HOST_DISPLAY}:80"
-    echo -e "  SSL + payload (TLS) : ${HOST_DISPLAY}:443"
-    echo -e "  SSL direct SSH      : ${HOST_DISPLAY}:447"
-    echo -e "  OpenSSH             : ${HOST_DISPLAY}:22"
-    echo -e "  Dropbear            : ${HOST_DISPLAY}:109 / 143"
+# ── frame drawing helpers ───────────────────────────────
+# strip ANSI codes to measure real text length
+_vislen() { local s; s=$(echo -ne "$1" | sed 's/\x1b\[[0-9;]*m//g'); echo -n "${#s}"; }
+
+line_top()  { echo -e "${1}╭$(printf '─%.0s' $(seq 1 $WIDTH))╮${NC}"; }
+line_mid()  { echo -e "${1}├$(printf '─%.0s' $(seq 1 $WIDTH))┤${NC}"; }
+line_bot()  { echo -e "${1}╰$(printf '─%.0s' $(seq 1 $WIDTH))╯${NC}"; }
+line_fill() { echo -e "${1}│$(printf ' %.0s' $(seq 1 $WIDTH))│${NC}"; }
+
+# row "border-color" "text-with-ansi"
+row() {
+    local col="$1" text="$2" len pad
+    len=$(_vislen "$text")
+    pad=$(( WIDTH - 2 - len ))
+    (( pad < 0 )) && pad=0
+    echo -e "${col}│${NC} ${text}$(printf ' %.0s' $(seq 1 $pad)) ${col}│${NC}"
+}
+# centered row
+crow() {
+    local col="$1" text="$2" len left right
+    len=$(_vislen "$text")
+    left=$(( (WIDTH - len) / 2 )); right=$(( WIDTH - len - left ))
+    (( left < 0 )) && left=0; (( right < 0 )) && right=0
+    echo -e "${col}│${NC}$(printf ' %.0s' $(seq 1 $left))${text}$(printf ' %.0s' $(seq 1 $right))${col}│${NC}"
 }
 
-create_user() {
+pause() { echo ""; read -rp "$(echo -e "  ${GR}↵  press ENTER to go back${NC} ")" _; }
+
+# count tunnel users / online
+count_users()  { awk -F: '$3>=1000 && ($7=="/bin/false"||$7=="/usr/sbin/nologin"){c++} END{print c+0}' /etc/passwd; }
+count_online() {
+    local n=0 u uid sh
+    while IFS=: read -r u _ uid _ _ _ sh; do
+        if [ "$uid" -ge 1000 ] 2>/dev/null && { [ "$sh" = "/bin/false" ] || [ "$sh" = "/usr/sbin/nologin" ]; }; then
+            pgrep -u "$u" >/dev/null 2>&1 && n=$((n+1))
+        fi
+    done < /etc/passwd
+    echo "$n"
+}
+
+banner() {
     clear
-    echo -e "${BGreen}=========== CREATE SSH USER ===========${NC}"
-    read -rp "  Username        : " USERNAME
-    [ -z "$USERNAME" ] && { echo -e "${BRed}Username cannot be empty.${NC}"; pause; return; }
+    echo ""
+    echo -e "   ${TEAL} ██████╗ ██████╗ ${SKY}██╗   ██╗${PINK}██████╗ ███╗   ██╗${NC}"
+    echo -e "   ${TEAL}██╔════╝██╔════╝ ${SKY}██║   ██║${PINK}██╔══██╗████╗  ██║${NC}"
+    echo -e "   ${TEAL}╚█████╗ ╚█████╗  ${SKY}███████║${PINK}██████╔╝██╔██╗ ██║${NC}"
+    echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
+    echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
+    echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
+    echo -e "        ${GR}ws · ssl · dropbear · openssh manager${NC}"
+    echo ""
+}
+
+status_bar() {
+    local col="$P" s dot
+    line_top "$col"
+    crow "$col" "${W}${BOLD}SSH VPN CONTROL PANEL${NC}"
+    line_mid "$col"
+    row "$col" "${GR}HOST${NC}    ${Y}${HOST_DISPLAY}${NC}"
+    row "$col" "${GR}USERS${NC}   ${C}$(count_users)${NC} total   ${LIME}$(count_online)${NC} online"
+    local svcline="${GR}SVC${NC}    "
+    for s in ssh dropbear ws-proxy stunnel4; do
+        if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
+        svcline+="${dot} ${s}   "
+    done
+    row "$col" "$svcline"
+    line_bot "$col"
+}
+
+show_ports() {
+    local col="$SKY"
+    line_top "$col"
+    crow "$col" "${W}${BOLD}CONNECTION PORTS${NC}"
+    line_mid "$col"
+    row "$col" "${LIME}▸${NC} WebSocket (payload)  ${GR}→${NC} ${W}${HOST_DISPLAY}:80${NC}"
+    row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443${NC}"
+    row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
+    row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
+    row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
+    line_bot "$col"
+}
+
+section() {  # section "TITLE" color
+    local col="${2:-$TEAL}"
+    banner
+    line_top "$col"; crow "$col" "${W}${BOLD}$1${NC}"; line_bot "$col"
+    echo ""
+}
+
+ok()   { echo -e "  ${G}✔${NC} $*"; }
+err()  { echo -e "  ${R}✘${NC} $*"; }
+note() { echo -e "  ${Y}➜${NC} $*"; }
+
+create_user() {
+    section "CREATE SSH USER" "$LIME"
+    read -rp "$(echo -e "  ${C}Username${NC}   : ")" USERNAME
+    [ -z "$USERNAME" ] && { err "Username cannot be empty."; pause; return; }
     if id "$USERNAME" >/dev/null 2>&1; then
-        echo -e "${BRed}User '$USERNAME' already exists.${NC}"; pause; return
+        err "User '${W}$USERNAME${NC}' already exists."; pause; return
     fi
-    read -rp "  Password        : " PASSWORD
-    [ -z "$PASSWORD" ] && { echo -e "${BRed}Password cannot be empty.${NC}"; pause; return; }
-    read -rp "  Days valid      : " DAYS
+    read -rp "$(echo -e "  ${C}Password${NC}   : ")" PASSWORD
+    [ -z "$PASSWORD" ] && { err "Password cannot be empty."; pause; return; }
+    read -rp "$(echo -e "  ${C}Days valid${NC} : ")" DAYS
     [[ ! "$DAYS" =~ ^[0-9]+$ ]] && DAYS=30
     EXP_DATE=$(date -d "+$DAYS days" +"%Y-%m-%d")
 
     useradd -e "$EXP_DATE" -M -s /bin/false "$USERNAME"
     echo -e "${PASSWORD}\n${PASSWORD}" | passwd "$USERNAME" >/dev/null 2>&1
 
-    clear
-    echo -e "${BGreen}=========================================${NC}"
-    echo -e "${BCyan}        SSH ACCOUNT CREATED               ${NC}"
-    echo -e "${BGreen}=========================================${NC}"
-    echo -e "  Host / Domain : ${BYellow}${HOST_DISPLAY}${NC}"
-    echo -e "  Username      : ${BYellow}${USERNAME}${NC}"
-    echo -e "  Password      : ${BYellow}${PASSWORD}${NC}"
-    echo -e "  Expires on    : ${BYellow}${EXP_DATE}${NC}  (${DAYS} days)"
-    echo -e "${BGreen}-----------------------------------------${NC}"
+    banner
+    local col="$G"
+    line_top "$col"; crow "$col" "${W}${BOLD}✔ ACCOUNT CREATED${NC}"; line_mid "$col"
+    row "$col" "${GR}Host${NC}      ${Y}${HOST_DISPLAY}${NC}"
+    row "$col" "${GR}Username${NC}  ${W}${USERNAME}${NC}"
+    row "$col" "${GR}Password${NC}  ${W}${PASSWORD}${NC}"
+    row "$col" "${GR}Expires${NC}   ${W}${EXP_DATE}${NC}  ${GR}(${DAYS} days)${NC}"
+    line_bot "$col"
     show_ports
-    echo -e "${BGreen}-----------------------------------------${NC}"
-    echo -e "  ${BPurple}SAMPLE WEBSOCKET PAYLOAD${NC}"
-    echo -e "  GET / HTTP/1.1[crlf]Host: ${HOST_DISPLAY}[crlf]"
-    echo -e "  Upgrade: websocket[crlf][crlf]"
-    echo -e "  ${BPurple}SSL/SNI host${NC} : ${HOST_DISPLAY}"
-    echo -e "${BGreen}=========================================${NC}"
+    local col2="$VIOLET"
+    line_top "$col2"; crow "$col2" "${W}${BOLD}CLIENT PAYLOAD / SNI${NC}"; line_mid "$col2"
+    row "$col2" "${GR}WS payload${NC}"
+    row "$col2" "${DIM}GET / HTTP/1.1[crlf]Host: ${HOST_DISPLAY}[crlf]${NC}"
+    row "$col2" "${DIM}Upgrade: websocket[crlf][crlf]${NC}"
+    row "$col2" "${GR}SSL / SNI host${NC}  ${W}${HOST_DISPLAY}${NC}"
+    line_bot "$col2"
     pause
 }
 
 delete_user() {
-    clear
-    echo -e "${BGreen}=========== DELETE SSH USER ===========${NC}"
-    read -rp "  Username to delete : " USERNAME
+    section "DELETE SSH USER" "$R"
+    read -rp "$(echo -e "  ${C}Username to delete${NC} : ")" USERNAME
     if ! id "$USERNAME" >/dev/null 2>&1; then
-        echo -e "${BRed}User '$USERNAME' does not exist.${NC}"; pause; return
+        err "User '${W}$USERNAME${NC}' does not exist."; pause; return
     fi
     pkill -u "$USERNAME" 2>/dev/null
     userdel -f "$USERNAME" >/dev/null 2>&1
-    echo -e "${BGreen}User '$USERNAME' deleted.${NC}"
+    ok "User '${W}$USERNAME${NC}' deleted."
     pause
 }
 
 list_users() {
-    clear
-    echo -e "${BGreen}=========== SSH USER LIST ===========${NC}"
-    printf "  %-20s %-12s %-8s\n" "USERNAME" "EXPIRES" "STATUS"
-    echo   "  -------------------------------------------"
+    section "SSH USER LIST" "$SKY"
+    local col="$SKY"
+    line_top "$col"
+    row "$col" "$(printf '%-18s %-12s %-8s' 'USERNAME' 'EXPIRES' 'STATUS')"
+    line_mid "$col"
+    local any=0
     while IFS=: read -r user _ uid _ _ _ shell; do
         if [ "$uid" -ge 1000 ] && { [ "$shell" = "/bin/false" ] || [ "$shell" = "/usr/sbin/nologin" ]; }; then
+            any=1
             EXP=$(chage -l "$user" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
             EXP_SHORT=$(date -d "$EXP" +"%Y-%m-%d" 2>/dev/null || echo "$EXP")
-            if pgrep -u "$user" >/dev/null 2>&1; then STATUS="online"; else STATUS="offline"; fi
-            printf "  %-20s %-12s %-8s\n" "$user" "$EXP_SHORT" "$STATUS"
+            if pgrep -u "$user" >/dev/null 2>&1; then
+                STAT="${G}● online${NC}"
+            else
+                STAT="${GR}○ offline${NC}"
+            fi
+            row "$col" "$(printf '%-18s %-12s' "$user" "$EXP_SHORT")${STAT}"
         fi
     done < /etc/passwd
+    [ "$any" -eq 0 ] && row "$col" "${GR}(no users yet — create one from the menu)${NC}"
+    line_bot "$col"
     pause
 }
 
 online_users() {
-    clear
-    echo -e "${BGreen}=========== ONLINE USERS ===========${NC}"
-    printf "  %-20s %-10s\n" "USERNAME" "SESSIONS"
-    echo   "  --------------------------------"
+    section "ONLINE USERS" "$LIME"
+    local col="$LIME"
+    line_top "$col"
+    row "$col" "$(printf '%-22s %-10s' 'USERNAME' 'SESSIONS')"
+    line_mid "$col"
+    local any=0
     while IFS=: read -r user _ uid _ _ _ shell; do
         if [ "$uid" -ge 1000 ] && { [ "$shell" = "/bin/false" ] || [ "$shell" = "/usr/sbin/nologin" ]; }; then
             COUNT=$(pgrep -u "$user" 2>/dev/null | wc -l)
-            [ "$COUNT" -gt 0 ] && printf "  %-20s %-10s\n" "$user" "$COUNT"
+            if [ "$COUNT" -gt 0 ]; then
+                any=1
+                row "$col" "$(printf '%-22s ' "$user")${C}${COUNT}${NC}"
+            fi
         fi
     done < /etc/passwd
+    [ "$any" -eq 0 ] && row "$col" "${GR}(nobody connected right now)${NC}"
+    line_bot "$col"
     pause
 }
 
 change_password() {
-    clear
-    echo -e "${BGreen}======== CHANGE PASSWORD ========${NC}"
-    read -rp "  Username     : " USERNAME
+    section "CHANGE PASSWORD" "$ORANGE"
+    read -rp "$(echo -e "  ${C}Username${NC}     : ")" USERNAME
     if ! id "$USERNAME" >/dev/null 2>&1; then
-        echo -e "${BRed}User does not exist.${NC}"; pause; return
+        err "User does not exist."; pause; return
     fi
-    read -rp "  New password : " PASSWORD
-    [ -z "$PASSWORD" ] && { echo -e "${BRed}Password cannot be empty.${NC}"; pause; return; }
+    read -rp "$(echo -e "  ${C}New password${NC} : ")" PASSWORD
+    [ -z "$PASSWORD" ] && { err "Password cannot be empty."; pause; return; }
     echo -e "${PASSWORD}\n${PASSWORD}" | passwd "$USERNAME" >/dev/null 2>&1
-    echo -e "${BGreen}Password updated for '$USERNAME'.${NC}"
+    ok "Password updated for '${W}$USERNAME${NC}'."
     pause
 }
 
 renew_user() {
-    clear
-    echo -e "${BGreen}======== RENEW ACCOUNT ========${NC}"
-    read -rp "  Username     : " USERNAME
+    section "RENEW / EXTEND ACCOUNT" "$VIOLET"
+    read -rp "$(echo -e "  ${C}Username${NC} : ")" USERNAME
     if ! id "$USERNAME" >/dev/null 2>&1; then
-        echo -e "${BRed}User does not exist.${NC}"; pause; return
+        err "User does not exist."; pause; return
     fi
-    read -rp "  Add days     : " DAYS
+    read -rp "$(echo -e "  ${C}Add days${NC} : ")" DAYS
     [[ ! "$DAYS" =~ ^[0-9]+$ ]] && DAYS=30
     NEW_EXP=$(date -d "+$DAYS days" +"%Y-%m-%d")
     chage -E "$NEW_EXP" "$USERNAME"
-    echo -e "${BGreen}'$USERNAME' now expires on $NEW_EXP.${NC}"
+    ok "'${W}$USERNAME${NC}' now expires on ${W}$NEW_EXP${NC}."
     pause
 }
 
 service_status() {
-    clear
-    echo -e "${BGreen}======== SERVICE STATUS ========${NC}"
+    section "SERVICE STATUS" "$P"
+    local col="$P"
+    line_top "$col"
     for svc in ssh dropbear ws-proxy stunnel4; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            echo -e "  ${BGreen}● RUNNING${NC}  $svc"
+            row "$col" "${G}● RUNNING${NC}   ${W}$svc${NC}"
         else
-            echo -e "  ${BRed}○ STOPPED${NC}  $svc"
+            row "$col" "${R}○ STOPPED${NC}   ${W}$svc${NC}"
         fi
     done
-    echo ""
+    line_bot "$col"
     show_ports
     pause
 }
 
 restart_services() {
-    clear
-    echo -e "${BYellow}Restarting all services...${NC}"
+    section "RESTART ALL SERVICES" "$ORANGE"
+    note "Restarting services, please wait..."
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
     systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
     systemctl restart stunnel4 2>/dev/null
-    echo -e "${BGreen}All services restarted.${NC}"
+    ok "All services restarted."
     pause
 }
 
+menu_item() {  # menu_item NUM ICON "Label" color
+    echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
+}
+
 while true; do
-    clear
-    echo -e "${BGreen}==================================================${NC}"
-    echo -e "${BCyan}            SSH VPN MANAGEMENT PANEL              ${NC}"
-    echo -e "${BGreen}==================================================${NC}"
-    echo -e "   Host   : ${BYellow}${HOST_DISPLAY}${NC}"
-    echo -e "${BGreen}--------------------------------------------------${NC}"
-    echo -e "   ${BYellow}1)${NC} Create SSH user"
-    echo -e "   ${BYellow}2)${NC} Delete SSH user"
-    echo -e "   ${BYellow}3)${NC} List all users"
-    echo -e "   ${BYellow}4)${NC} Show online users"
-    echo -e "   ${BYellow}5)${NC} Change user password"
-    echo -e "   ${BYellow}6)${NC} Renew / extend account"
-    echo -e "   ${BYellow}7)${NC} Service status"
-    echo -e "   ${BYellow}8)${NC} Restart all services"
-    echo -e "   ${BYellow}0)${NC} Exit"
-    echo -e "${BGreen}==================================================${NC}"
-    read -rp "   Select an option: " OPT
+    banner
+    status_bar
+    echo ""
+    menu_item "1" "➕" "Create SSH user"          "$LIME"
+    menu_item "2" "🗑 " "Delete SSH user"          "$R"
+    menu_item "3" "📋" "List all users"           "$SKY"
+    menu_item "4" "🟢" "Show online users"        "$G"
+    menu_item "5" "🔑" "Change user password"     "$ORANGE"
+    menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
+    menu_item "7" "📊" "Service status"           "$C"
+    menu_item "8" "🔄" "Restart all services"     "$Y"
+    menu_item "0" "🚪" "Exit"                     "$GR"
+    echo ""
+    read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
     case "$OPT" in
         1) create_user ;;
         2) delete_user ;;
@@ -599,8 +706,8 @@ while true; do
         6) renew_user ;;
         7) service_status ;;
         8) restart_services ;;
-        0) clear; exit 0 ;;
-        *) echo -e "${BRed}Invalid option.${NC}"; sleep 1 ;;
+        0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
+        *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
 done
 MENUEOF
