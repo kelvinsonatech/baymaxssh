@@ -10,10 +10,10 @@
 #   22   — OpenSSH
 #   109  — Dropbear
 #   143  — Dropbear (alt)
-#   447  — SSH over SSL   (Stunnel → :22)
+#   443  — SSH over SSL   (Stunnel → :22)
 #   777  — Dropbear over SSL (Stunnel → :109)
-#   444  — WebSocket over SSL (Stunnel → :8880)
-#   8880 — SSH over WebSocket (ws-proxy → Dropbear:109)
+#   444  — WebSocket over SSL (Stunnel → :80)
+#   80   — SSH over WebSocket (ws-proxy → Dropbear:109)
 #
 # Usage:
 #   chmod +x ssh-ssl-setup.sh
@@ -155,18 +155,18 @@ success "Dropbear running on ports 109 and 143"
 # ═══════════════════════════════════════════
 # SECTION 3 — WEBSOCKET → SSH PROXY
 # ═══════════════════════════════════════════
-info "Installing Python WebSocket-to-SSH proxy (port 8880)..."
+info "Installing Python WebSocket-to-SSH proxy (port 80)..."
 
 cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
-"""WebSocket-to-SSH bridge: 127.0.0.1:8880 -> Dropbear 127.0.0.1:109."""
+"""WebSocket-to-SSH bridge: 0.0.0.0:80 -> Dropbear 127.0.0.1:109."""
 import socket
 import threading
 
 TARGET_HOST = '127.0.0.1'
 TARGET_PORT = 109
 LISTEN_HOST = '0.0.0.0'
-LISTEN_PORT = 8880
+LISTEN_PORT = 80
 HANDSHAKE_TIMEOUT = 15
 
 
@@ -241,7 +241,7 @@ chmod +x /usr/local/bin/ws-proxy.py
 
 cat > /etc/systemd/system/ws-proxy.service <<'EOF'
 [Unit]
-Description=WebSocket-to-SSH proxy (port 8880 -> Dropbear 109)
+Description=WebSocket-to-SSH proxy (port 80 -> Dropbear 109)
 After=network.target dropbear.service
 
 [Service]
@@ -257,7 +257,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now ws-proxy >/dev/null 2>&1
-success "WebSocket-SSH proxy running on port 8880"
+success "WebSocket-SSH proxy running on port 80"
 
 # ═══════════════════════════════════════════
 # SECTION 4 — SSL CERTIFICATE
@@ -271,6 +271,8 @@ if [ -n "$DOMAIN" ]; then
     eval "$APT certbot" </dev/null >/dev/null 2>&1 || true
     systemctl stop nginx 2>/dev/null || true
     systemctl stop apache2 2>/dev/null || true
+    # ws-proxy holds port 80; free it so certbot can validate the domain
+    systemctl stop ws-proxy 2>/dev/null || true
     certbot certonly --standalone -d "$DOMAIN" \
         --non-interactive --agree-tos \
         --register-unsafely-without-email >/dev/null 2>&1 && LE_OK=1 || LE_OK=0
@@ -312,7 +314,7 @@ socket  = l:TCP_NODELAY=1
 socket  = r:TCP_NODELAY=1
 
 [ssh-ssl]
-accept  = 447
+accept  = 443
 connect = 127.0.0.1:22
 
 [dropbear-ssl]
@@ -321,24 +323,27 @@ connect = 127.0.0.1:109
 
 [wss-bypass]
 accept  = 444
-connect = 127.0.0.1:8880
+connect = 127.0.0.1:80
 EOF
 
 systemctl enable stunnel4 >/dev/null 2>&1 || true
 systemctl restart stunnel4 >/dev/null 2>&1
-success "Stunnel running — ssh-ssl:447 | dropbear-ssl:777 | wss-ssl:444"
+success "Stunnel running — ssh-ssl:443 | dropbear-ssl:777 | wss-ssl:444"
+
+# Ensure the WebSocket proxy is back up (it was stopped for cert issuance)
+systemctl restart ws-proxy >/dev/null 2>&1 || true
 
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
 # ═══════════════════════════════════════════
 info "Opening firewall ports..."
 if command -v ufw >/dev/null 2>&1; then
-    for P in 22 109 143 444 447 777 8880; do
+    for P in 22 80 109 143 443 444 777; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
     success "UFW rules applied"
 else
-    warn "ufw not found — open TCP ports manually: 22 109 143 444 447 777 8880"
+    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 444 777"
 fi
 
 # ═══════════════════════════════════════════
@@ -397,9 +402,9 @@ create_user() {
     echo -e "  ${BPurple}CONNECTION PORTS${NC}"
     echo -e "  OpenSSH             : ${HOST_DISPLAY}:22"
     echo -e "  Dropbear            : ${HOST_DISPLAY}:109 / 143"
-    echo -e "  SSH over SSL        : ${HOST_DISPLAY}:447"
+    echo -e "  SSH over SSL        : ${HOST_DISPLAY}:443"
     echo -e "  Dropbear over SSL   : ${HOST_DISPLAY}:777"
-    echo -e "  SSH over WebSocket  : ws://${HOST_DISPLAY}:8880"
+    echo -e "  SSH over WebSocket  : ws://${HOST_DISPLAY}:80"
     echo -e "  SSH over WSS (TLS)  : wss://${HOST_DISPLAY}:444"
     echo -e "${BGreen}=========================================${NC}"
     pause
@@ -497,8 +502,8 @@ service_status() {
         fi
     done
     echo ""
-    echo -e "  ${BCyan}Ports:${NC} 22 (ssh) 109/143 (dropbear) 447 (ssh-ssl)"
-    echo -e "         777 (dropbear-ssl) 444 (wss) 8880 (ws)"
+    echo -e "  ${BCyan}Ports:${NC} 22 (ssh) 109/143 (dropbear) 443 (ssh-ssl)"
+    echo -e "         777 (dropbear-ssl) 444 (wss) 80 (ws)"
     pause
 }
 
@@ -564,9 +569,9 @@ echo ""
 echo -e "  ${BCyan}Installed services & ports:${NC}"
 echo -e "    OpenSSH            → 22"
 echo -e "    Dropbear           → 109, 143"
-echo -e "    SSH over SSL       → 447"
+echo -e "    SSH over SSL       → 443"
 echo -e "    Dropbear over SSL  → 777"
-echo -e "    SSH over WebSocket → 8880"
+echo -e "    SSH over WebSocket → 80"
 echo -e "    SSH over WSS (TLS) → 444"
 echo ""
 echo -e "${BGreen}============================================================${NC}"
