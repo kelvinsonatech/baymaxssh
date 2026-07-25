@@ -239,26 +239,21 @@ func handle(client net.Conn) {
 		return
 	}
 
-	// HTTP / WebSocket payload: read the rest of the request headers.
-	buf := append([]byte{}, head...)
-	for !bytes.Contains(buf, []byte("\r\n\r\n")) && len(buf) < 8192 {
-		client.SetReadDeadline(time.Now().Add(peekTimeout))
-		m, e := client.Read(first)
-		client.SetReadDeadline(time.Time{})
-		if m > 0 {
-			buf = append(buf, first[:m]...)
-		}
-		if e != nil {
-			break
-		}
-	}
-
+	// HTTP / WebSocket payload: reply 101 IMMEDIATELY (do not wait for the
+	// full header terminator — many injector payloads never send \r\n\r\n,
+	// which used to stall every connect until the read timeout fired).
 	if _, err := client.Write(response); err != nil {
 		client.Close()
 		backend.Close()
 		return
 	}
-	bridge(client, backend, nil)
+	// The initial payload bytes are HTTP headers we discard; if the client
+	// already appended real SSH data after a blank line, forward that part.
+	var carry []byte
+	if idx := bytes.Index(head, []byte("\r\n\r\n")); idx >= 0 {
+		carry = head[idx+4:]
+	}
+	bridge(client, backend, carry)
 }
 
 func main() {
@@ -336,20 +331,13 @@ def handle(c):
         try: bridge(c,b,f)
         finally: c.close(); b.close()
         return
-    buf=f
-    try:
-        c.settimeout(T)
-        while b"\r\n\r\n" not in buf and len(buf)<8192:
-            m=c.recv(4096)
-            if not m: break
-            buf+=m
-    except Exception: pass
-    finally:
-        try: c.settimeout(None)
-        except Exception: pass
+    # HTTP/WebSocket payload: reply 101 immediately (don't wait for \r\n\r\n).
     try: c.sendall(RESP)
     except Exception: c.close(); b.close(); return
-    try: bridge(c,b)
+    carry=b""
+    idx=f.find(b"\r\n\r\n")
+    if idx>=0: carry=f[idx+4:]
+    try: bridge(c,b,carry)
     finally: c.close(); b.close()
 def main():
     s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
