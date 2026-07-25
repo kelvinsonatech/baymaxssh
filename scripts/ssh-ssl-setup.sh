@@ -512,6 +512,14 @@ VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_T
 VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_TLS=8448; VL_SPLIT_NONE=8085
 # Trojan ports (TLS only)
 TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
+# If the operator handed port 443 to V2Ray (SSL payload disabled), move that
+# protocol's WS-TLS listener onto 443.
+P443=$(cat /etc/xray/port443 2>/dev/null)
+case "$P443" in
+    vmess)  VM_WS_TLS=443;;
+    vless)  VL_WS_TLS=443;;
+    trojan) TR_WS_TLS=443;;
+esac
 mkdir -p /etc/xray /usr/local/etc/xray; touch "$XACC"
 DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
 HOST="${DOMAIN:-$(cat "$CONF_DIR/ip.conf" 2>/dev/null)}"
@@ -986,6 +994,10 @@ VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_T
 VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_TLS=8448; VL_SPLIT_NONE=8085
 # Trojan (TLS only)
 TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
+# Port-443 handover flag (when set, V2Ray owns 443 and SSL payload is off)
+XP443F=/etc/xray/port443
+STCONF=/etc/stunnel/stunnel.conf
+STCERT=/etc/stunnel/stunnel.pem
 
 xray_paths() {
     mkdir -p /etc/xray /usr/local/etc/xray
@@ -1002,6 +1014,83 @@ xray_paths() {
             -subj "/CN=${XHOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
         XR_CERT=/etc/xray/xray.crt; XR_KEY=/etc/xray/xray.key
     fi
+    # Mirror the 443 handover so displayed links use the right port.
+    P443=$(cat "$XP443F" 2>/dev/null)
+    case "$P443" in
+        vmess)  VM_WS_TLS=443;;
+        vless)  VL_WS_TLS=443;;
+        trojan) TR_WS_TLS=443;;
+    esac
+}
+
+# Rewrite stunnel.conf. $1=yes keeps the SSL-payload listener on 443; no drops it.
+write_stunnel_conf() {
+    {
+        echo "pid     = /var/run/stunnel4.pid"
+        echo "cert    = ${STCERT}"
+        echo "client  = no"
+        echo "socket  = a:SO_REUSEADDR=1"
+        echo "socket  = l:TCP_NODELAY=1"
+        echo "socket  = r:TCP_NODELAY=1"
+        echo "TIMEOUTclose = 0"
+        echo ""
+        if [ "$1" = "yes" ]; then
+            echo "[ssl-ws]"
+            echo "accept  = 443"
+            echo "connect = 127.0.0.1:80"
+            echo ""
+        fi
+        echo "[ssl-ssh]"
+        echo "accept  = 447"
+        echo "connect = 127.0.0.1:22"
+    } > "$STCONF"
+}
+
+# Toggle port 443 between SSL-payload SSH and V2Ray.
+xray_443() {
+    xray_paths
+    section "PORT 443 — SSL PAYLOAD ↔ V2RAY" "$PINK"
+    local cur; cur=$(cat "$XP443F" 2>/dev/null)
+    local col="$PINK"; line_top "$col"
+    if [ -n "$cur" ]; then
+        row "$col" "${GR}443 NOW${NC}  ${P}V2Ray — ${cur} (WS-TLS)${NC}"
+        row "$col" "${GR}SSL PAYLOAD${NC} ${R}disabled${NC}"
+    else
+        row "$col" "${GR}443 NOW${NC}  ${G}SSL payload SSH${NC}"
+    fi
+    line_bot "$col"; echo ""
+    if [ -n "$cur" ]; then
+        read -rp "$(echo -e "  ${C}Restore SSL-payload SSH on 443?${NC} ${GR}(y/N)${NC} : ")" a
+        if [[ "$a" =~ ^[Yy] ]]; then
+            rm -f "$XP443F"
+            write_stunnel_conf yes
+            systemctl restart stunnel4 >/dev/null 2>&1
+            rebuild_config; systemctl restart xray >/dev/null 2>&1
+            ok "Port 443 restored to ${G}SSL-payload SSH${NC}."
+        else
+            note "No change."
+        fi
+    else
+        warn "This DISABLES SSL-payload SSH on 443 completely — SSH-SSL users on 443 will stop working (80/109/143/447 stay up)."
+        echo -e "  ${C}Give 443 to which V2Ray protocol?${NC}"
+        echo -e "    ${LIME}1${NC}) VMess   ${LIME}2${NC}) VLESS   ${LIME}3${NC}) Trojan   ${GR}0${NC}) cancel"
+        read -rp "$(echo -e "  ${P}❯${NC} choose : ")" pc
+        local proto=""
+        case "$pc" in 1) proto=vmess;; 2) proto=vless;; 3) proto=trojan;; *) note "Cancelled."; pause; return;; esac
+        if ! xray_install; then err "Xray must be installed first — create an account."; pause; return; fi
+        echo "$proto" > "$XP443F"
+        write_stunnel_conf no
+        systemctl restart stunnel4 >/dev/null 2>&1
+        rebuild_config
+        systemctl enable xray >/dev/null 2>&1; systemctl restart xray >/dev/null 2>&1
+        sleep 1
+        if systemctl is-active --quiet xray; then
+            ok "Port 443 now serves ${P}${proto}${NC} (WS-TLS). Re-open any account to get its 443 link."
+        else
+            err "Xray failed to start — check: journalctl -u xray"
+        fi
+    fi
+    pause
 }
 
 # Rebuild the Xray config from the accounts file (shared generator).
@@ -1180,10 +1269,12 @@ xray_menu() {
         if [ ! -f "$XBIN" ]; then st="${R}✗ not installed${NC}"
         elif systemctl is-active --quiet xray 2>/dev/null; then st="${G}● active${NC}"
         else st="${Y}○ installed (stopped)${NC}"; fi
+        local p443; p443=$(cat "$XP443F" 2>/dev/null)
         line_top "$col"
         row "$col" "${GR}STATUS${NC}  ${st}"
         row "$col" "${GR}HOST${NC}    ${Y}${XHOST}${NC}"
         row "$col" "${GR}ACCTS${NC}   ${C}$(grep -c '|' "$XACC" 2>/dev/null || echo 0)${NC}"
+        if [ -n "$p443" ]; then row "$col" "${GR}PORT443${NC} ${P}V2Ray (${p443})${NC}"; else row "$col" "${GR}PORT443${NC} ${G}SSL payload SSH${NC}"; fi
         line_bot "$col"
         echo ""
         menu_item "1" "⚡" "Create account (VMess/VLESS/Trojan)" "$LIME"
@@ -1191,6 +1282,7 @@ xray_menu() {
         menu_item "3" "🗑 " "Delete account"                 "$R"
         menu_item "4" "▶ " "Start Xray"                      "$G"
         menu_item "5" "⏹ " "Stop Xray"                       "$Y"
+        menu_item "6" "🔀" "Port 443: SSL payload ↔ V2Ray"   "$ORANGE"
         menu_item "0" "↩ " "Back to main menu"              "$GR"
         echo ""
         read -rp "$(echo -e "  ${P}❯${NC} select : ")" o
@@ -1200,6 +1292,7 @@ xray_menu() {
             3) xray_delete ;;
             4) systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; ok "Xray started."; sleep 1 ;;
             5) systemctl stop xray >/dev/null 2>&1; ok "Xray stopped."; sleep 1 ;;
+            6) xray_443 ;;
             0) break ;;
             *) err "Invalid option."; sleep 1 ;;
         esac
