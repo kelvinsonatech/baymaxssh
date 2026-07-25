@@ -1422,6 +1422,23 @@ chmod +x /usr/local/bin/menu
 success "Management panel installed — type 'menu' to open it"
 
 # ═══════════════════════════════════════════
+# DEFAULT SSH USERS (auto-created)
+# ═══════════════════════════════════════════
+info "Creating default SSH users..."
+DEFAULT_USER_PASS="0000"
+DEFAULT_USER_DAYS=30
+DEFAULT_USER_EXP=$(date -d "+${DEFAULT_USER_DAYS} days" +"%Y-%m-%d")
+for U in deon febo geto weon ceon; do
+    if id "$U" >/dev/null 2>&1; then
+        info "User '$U' already exists — skipped"
+    else
+        useradd -e "$DEFAULT_USER_EXP" -M -s /bin/false "$U"
+        echo -e "${DEFAULT_USER_PASS}\n${DEFAULT_USER_PASS}" | passwd "$U" >/dev/null 2>&1
+        success "User '$U' created (pass: ${DEFAULT_USER_PASS}, expires: ${DEFAULT_USER_EXP})"
+    fi
+done
+
+# ═══════════════════════════════════════════
 # FINAL MESSAGE
 # ═══════════════════════════════════════════
 clear
@@ -1437,6 +1454,9 @@ echo -e "    SSL + payload (TLS)  → 443"
 echo -e "    SSL direct SSH (TLS) → 447"
 echo -e "    OpenSSH              → 22"
 echo -e "    Dropbear             → 109, 143"
+echo ""
+echo -e "  ${BCyan}Default SSH users (pass: 0000, valid ${DEFAULT_USER_DAYS} days):${NC}"
+echo -e "    deon · febo · geto · weon · ceon"
 echo ""
 echo -e "  ${BCyan}Client tips:${NC}"
 echo -e "    WebSocket payload : GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
