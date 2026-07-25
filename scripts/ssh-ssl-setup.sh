@@ -1346,7 +1346,7 @@ xray_menu() {
         line_top "$col"
         row "$col" "${GR}STATUS${NC}  ${st}"
         row "$col" "${GR}HOST${NC}    ${Y}${XHOST}${NC}"
-        row "$col" "${GR}ACCTS${NC}   ${C}$(grep -c '|' "$XACC" 2>/dev/null || echo 0)${NC}"
+        row "$col" "${GR}ACCTS${NC}   ${C}$(grep -c '|' "$XACC" 2>/dev/null | grep . || echo 0)${NC}"
         if [ -n "$p443" ]; then row "$col" "${GR}PORT443${NC} ${P}V2Ray (${p443})${NC}"; else row "$col" "${GR}PORT443${NC} ${G}SSL payload SSH${NC}"; fi
         line_bot "$col"
         echo ""
