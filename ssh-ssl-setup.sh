@@ -549,7 +549,7 @@ status_bar() {
     row "$col" "${GR}HOST${NC}    ${Y}${HOST_DISPLAY}${NC}"
     row "$col" "${GR}USERS${NC}   ${C}$(count_users)${NC} total   ${LIME}$(count_online)${NC} online"
     read -r _rx _tx _tot <<<"$(bw_alltime)"
-    row "$col" "${GR}NET${NC}     ${SKY}↓$(hb "$_rx")${NC}  ${ORANGE}↑$(hb "$_tx")${NC}  ${W}Σ $(hb "$_tot")${NC}"
+    row "$col" "${GR}DATA${NC}    ${W}${BOLD}$(hb "$_tot")${NC} ${GR}used${NC}"
     local svcline="${GR}SVC${NC}    "
     for s in ssh dropbear ws-proxy stunnel4; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
@@ -677,25 +677,23 @@ online_users() {
 }
 
 bandwidth() {
-    section "BANDWIDTH USAGE" "$SKY"
     local col="$SKY"
-    read -r trx ttx ttot <<<"$(bw_period d)"
-    read -r mrx mtx mtot <<<"$(bw_period m)"
-    read -r arx atx atot <<<"$(bw_alltime)"
-    line_top "$col"
-    crow "$col" "${W}${BOLD}INTERFACE: ${IFACE:-unknown}${NC}"
-    line_mid "$col"
-    row "$col" "$(printf '%-9s' 'PERIOD')${SKY}$(printf '%12s' 'DOWN ↓')${NC}${ORANGE}$(printf '%12s' 'UP ↑')${NC}${W}$(printf '%14s' 'TOTAL Σ')${NC}"
-    line_mid "$col"
-    row "$col" "$(printf '%-9s' 'Today')${SKY}$(printf '%12s' "$(hb "$trx")")${NC}${ORANGE}$(printf '%12s' "$(hb "$ttx")")${NC}${W}$(printf '%14s' "$(hb "$ttot")")${NC}"
-    row "$col" "$(printf '%-9s' 'Month')${SKY}$(printf '%12s' "$(hb "$mrx")")${NC}${ORANGE}$(printf '%12s' "$(hb "$mtx")")${NC}${W}$(printf '%14s' "$(hb "$mtot")")${NC}"
-    line_mid "$col"
-    row "$col" "$(printf '%-9s' 'ALL TIME')${SKY}$(printf '%12s' "$(hb "$arx")")${NC}${ORANGE}$(printf '%12s' "$(hb "$atx")")${NC}${W}$(printf '%14s' "$(hb "$atot")")${NC}"
-    line_bot "$col"
-    if ! command -v vnstat >/dev/null 2>&1; then
-        note "vnstat not installed — showing since-boot counters only."
-    fi
-    pause
+    # Live view: refresh every 2s until the user presses a key.
+    while true; do
+        section "BANDWIDTH MONITOR" "$SKY"
+        read -r arx atx atot <<<"$(bw_alltime)"
+        line_top "$col"
+        crow "$col" "${GR}TOTAL BANDWIDTH USED${NC}"
+        crow "$col" "${W}${BOLD}$(hb "$atot")${NC}"
+        line_mid "$col"
+        row "$col" "${SKY}↓ Download${NC}   ${W}$(hb "$arx")${NC}"
+        row "$col" "${ORANGE}↑ Upload${NC}     ${W}$(hb "$atx")${NC}"
+        line_bot "$col"
+        echo ""
+        echo -e "  ${G}● live${NC} ${GR}— updates every 2s · press ENTER to go back${NC}"
+        # wait up to 2s for ENTER; if pressed, exit the loop
+        if read -t 2 -r _; then break; fi
+    done
 }
 
 change_password() {
