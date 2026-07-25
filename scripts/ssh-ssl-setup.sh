@@ -1101,17 +1101,31 @@ xray_443() {
         case "$pc" in 1) proto=vmess;; 2) proto=vless;; 3) proto=trojan;; *) note "Cancelled."; pause; return;; esac
         if ! xray_install; then err "Xray must be installed first — create an account."; pause; return; fi
         echo "$proto" > "$XP443F"
+        # Xray usually runs as a non-root user; 443 is a privileged port.
+        # Grant CAP_NET_BIND_SERVICE via a systemd drop-in (idempotent).
+        mkdir -p /etc/systemd/system/xray.service.d
+        cat > /etc/systemd/system/xray.service.d/priv-port.conf <<'DROPEOF'
+[Service]
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+DROPEOF
+        systemctl daemon-reload >/dev/null 2>&1
         # Order matters: stunnel must RELEASE 443 before Xray can bind it.
         write_stunnel_conf no
         systemctl restart stunnel4 >/dev/null 2>&1
-        sleep 1
+        local w=0
+        while ss -ltn 2>/dev/null | grep -q ':443 ' && [ $w -lt 5 ]; do sleep 1; w=$((w+1)); done
         rebuild_config
         systemctl enable xray >/dev/null 2>&1; systemctl restart xray >/dev/null 2>&1
-        sleep 1
-        if systemctl is-active --quiet xray; then
+        sleep 2
+        if systemctl is-active --quiet xray && ss -ltn 2>/dev/null | grep -q ':443 '; then
             ok "Port 443 now serves ${P}${proto}${NC} (WS-TLS). Re-open any account to get its 443 link."
         else
-            err "Xray failed to start — check: journalctl -u xray"
+            err "Xray could not take over 443. Last errors:"
+            journalctl -u xray -n 8 --no-pager 2>/dev/null | sed 's/^/    /'
+            note "Rolling back — 443 returns to SSL-payload SSH."
+            rm -f "$XP443F"; rebuild_config
+            systemctl restart xray >/dev/null 2>&1
+            write_stunnel_conf yes; systemctl restart stunnel4 >/dev/null 2>&1
         fi
     fi
     pause
