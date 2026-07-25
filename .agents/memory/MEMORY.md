@@ -1,0 +1,1 @@
+- [myssh setup script conventions](myssh-script.md) — edit scripts/ssh-ssl-setup.sh, copy to root, bash -n main + menu heredoc, push replit-agent; 443 needs CAP_NET_BIND_SERVICE.
