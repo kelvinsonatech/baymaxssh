@@ -151,154 +151,222 @@ success "Dropbear running on ports 109 and 143"
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
 # ═══════════════════════════════════════════
-info "Installing dual-mode WebSocket/SSH proxy (port 80)..."
+info "Building high-performance Go WebSocket/SSH proxy (port 80)..."
 
-cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
-#!/usr/bin/env python3
-"""
-Dual-mode WebSocket/SSH proxy.
+# Remove any leftover Python proxy from a previous install.
+rm -f /usr/local/bin/ws-proxy.py 2>/dev/null || true
 
-Listens on 0.0.0.0:80. For each connection it peeks at the first bytes:
+# --- Ensure a Go compiler is available -----------------------------------
+if ! command -v go >/dev/null 2>&1; then
+    info "Installing Go toolchain..."
+    eval "$APT golang-go" </dev/null >/dev/null 2>&1 || true
+fi
+GO_BIN="$(command -v go || true)"
 
-  * If the client speaks SSH directly (data begins with "SSH-"), the
-    connection is tunnelled straight to the backend SSH server.
-  * Otherwise the data is treated as an HTTP/WebSocket payload: the
-    proxy replies "HTTP/1.1 101 Switching Protocols" and then tunnels
-    to SSH. This is what VPN apps (HTTP Injector, HTTP Custom, etc.)
-    expect for a WebSocket payload.
-  * If nothing arrives quickly, it assumes a direct SSH client that is
-    waiting for the server banner and tunnels straight through.
+BUILD_DIR=/tmp/ws-proxy-build
+rm -rf "$BUILD_DIR"; mkdir -p "$BUILD_DIR"
 
-Backend SSH = Dropbear on 127.0.0.1:109.
-"""
-import socket
-import threading
+cat > "$BUILD_DIR/main.go" <<'GOEOF'
+// Dual-mode WebSocket/SSH proxy (compiled).
+//
+// Listens on 0.0.0.0:80. For each connection it peeks at the first bytes:
+//   * If the client speaks SSH directly (data begins with "SSH-"), the
+//     connection is tunnelled straight to the backend SSH server.
+//   * Otherwise the bytes are treated as an HTTP/WebSocket payload: the
+//     proxy replies "HTTP/1.1 101 Switching Protocols" and tunnels to SSH.
+//   * If nothing arrives quickly, it assumes a direct SSH client waiting
+//     for the banner and tunnels straight through.
+//
+// Backend SSH = Dropbear on 127.0.0.1:109.
+package main
 
-BACKEND_HOST = '127.0.0.1'
-BACKEND_PORT = 109
-LISTEN_HOST  = '0.0.0.0'
-LISTEN_PORT  = 80
-PEEK_TIMEOUT = 3          # seconds to wait for an initial payload
-RESPONSE = (
-    b"HTTP/1.1 101 Switching Protocols\r\n"
-    b"Upgrade: websocket\r\n"
-    b"Connection: Upgrade\r\n\r\n"
+import (
+	"bytes"
+	"io"
+	"log"
+	"net"
+	"time"
 )
 
+const (
+	listenAddr  = "0.0.0.0:80"
+	backendAddr = "127.0.0.1:109"
+	peekTimeout = 3 * time.Second
+)
 
-def pipe(src, dst):
+var response = []byte("HTTP/1.1 101 Switching Protocols\r\n" +
+	"Upgrade: websocket\r\n" +
+	"Connection: Upgrade\r\n\r\n")
+
+func pipe(dst, src net.Conn, done chan struct{}) {
+	buf := make([]byte, 65536)
+	io.CopyBuffer(dst, src, buf)
+	if c, ok := dst.(*net.TCPConn); ok {
+		c.CloseWrite()
+	}
+	done <- struct{}{}
+}
+
+func bridge(client, backend net.Conn, prefix []byte) {
+	if len(prefix) > 0 {
+		backend.Write(prefix)
+	}
+	done := make(chan struct{}, 2)
+	go pipe(backend, client, done)
+	go pipe(client, backend, done)
+	<-done
+	<-done
+	client.Close()
+	backend.Close()
+}
+
+func handle(client net.Conn) {
+	backend, err := net.Dial("tcp", backendAddr)
+	if err != nil {
+		client.Close()
+		return
+	}
+
+	first := make([]byte, 4096)
+	client.SetReadDeadline(time.Now().Add(peekTimeout))
+	n, _ := client.Read(first)
+	client.SetReadDeadline(time.Time{})
+	head := first[:n]
+
+	// Direct SSH client (or nothing yet): forward straight through.
+	if n == 0 || bytes.HasPrefix(head, []byte("SSH-")) {
+		bridge(client, backend, head)
+		return
+	}
+
+	// HTTP / WebSocket payload: read the rest of the request headers.
+	buf := append([]byte{}, head...)
+	for !bytes.Contains(buf, []byte("\r\n\r\n")) && len(buf) < 8192 {
+		client.SetReadDeadline(time.Now().Add(peekTimeout))
+		m, e := client.Read(first)
+		client.SetReadDeadline(time.Time{})
+		if m > 0 {
+			buf = append(buf, first[:m]...)
+		}
+		if e != nil {
+			break
+		}
+	}
+
+	if _, err := client.Write(response); err != nil {
+		client.Close()
+		backend.Close()
+		return
+	}
+	bridge(client, backend, nil)
+}
+
+func main() {
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		log.Fatalf("listen %s: %v", listenAddr, err)
+	}
+	log.Printf("dual-mode proxy on %s -> SSH %s", listenAddr, backendAddr)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+		if tc, ok := conn.(*net.TCPConn); ok {
+			tc.SetNoDelay(true)
+		}
+		go handle(conn)
+	}
+}
+GOEOF
+
+BUILT=0
+if [ -n "$GO_BIN" ]; then
+    ( cd "$BUILD_DIR" && \
+      GOFLAGS=-mod=mod GO111MODULE=off GOCACHE=/tmp/go-cache \
+      "$GO_BIN" build -ldflags "-s -w" -o /usr/local/bin/ws-proxy main.go ) \
+      >/dev/null 2>&1 && [ -x /usr/local/bin/ws-proxy ] && BUILT=1
+fi
+
+if [ "$BUILT" -eq 1 ]; then
+    PROXY_EXEC=/usr/local/bin/ws-proxy
+    success "Compiled Go proxy installed (port 80)"
+else
+    # ---- Fallback: Python proxy (if Go could not be installed/built) ----
+    warn "Go build unavailable — falling back to Python proxy"
+    eval "$APT python3" </dev/null >/dev/null 2>&1 || true
+    cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
+#!/usr/bin/env python3
+import socket, threading
+BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=3
+RESP=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+def pipe(s,d):
     try:
         while True:
-            data = src.recv(65536)
-            if not data:
-                break
-            dst.sendall(data)
-    except Exception:
-        pass
+            b=s.recv(65536)
+            if not b: break
+            d.sendall(b)
+    except Exception: pass
     finally:
-        for s in (src, dst):
-            try:
-                s.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            try:
-                s.close()
-            except Exception:
-                pass
-
-
-def bridge(client, backend, prefix=b""):
-    if prefix:
-        try:
-            backend.sendall(prefix)
-        except Exception:
-            pass
-    t1 = threading.Thread(target=pipe, args=(client, backend), daemon=True)
-    t2 = threading.Thread(target=pipe, args=(backend, client), daemon=True)
-    t1.start(); t2.start(); t1.join(); t2.join()
-
-
-def handle(client):
-    backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        for x in (s,d):
+            try: x.shutdown(socket.SHUT_RDWR)
+            except Exception: pass
+            try: x.close()
+            except Exception: pass
+def bridge(c,b,pre=b""):
+    if pre:
+        try: b.sendall(pre)
+        except Exception: pass
+    t1=threading.Thread(target=pipe,args=(c,b),daemon=True)
+    t2=threading.Thread(target=pipe,args=(b,c),daemon=True)
+    t1.start();t2.start();t1.join();t2.join()
+def handle(c):
+    b=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+    try: b.connect(BACKEND)
+    except Exception: c.close(); return
+    f=b""
     try:
-        backend.connect((BACKEND_HOST, BACKEND_PORT))
-    except Exception:
-        client.close()
+        c.settimeout(T); f=c.recv(4096)
+    except socket.timeout: f=b""
+    except Exception: c.close(); b.close(); return
+    finally:
+        try: c.settimeout(None)
+        except Exception: pass
+    if f.startswith(b"SSH-") or f==b"":
+        try: bridge(c,b,f)
+        finally: c.close(); b.close()
         return
-
-    first = b""
+    buf=f
     try:
-        client.settimeout(PEEK_TIMEOUT)
-        first = client.recv(4096)
-    except socket.timeout:
-        first = b""
-    except Exception:
-        client.close(); backend.close(); return
+        c.settimeout(T)
+        while b"\r\n\r\n" not in buf and len(buf)<8192:
+            m=c.recv(4096)
+            if not m: break
+            buf+=m
+    except Exception: pass
     finally:
-        try:
-            client.settimeout(None)
-        except Exception:
-            pass
-
-    # Direct SSH client: forward the bytes we already read.
-    if first.startswith(b"SSH-") or first == b"":
-        try:
-            bridge(client, backend, prefix=first)
-        finally:
-            client.close(); backend.close()
-        return
-
-    # HTTP / WebSocket payload: read the rest of the request headers,
-    # then answer with a 101 upgrade and tunnel to SSH.
-    buf = first
-    try:
-        client.settimeout(PEEK_TIMEOUT)
-        while b"\r\n\r\n" not in buf and len(buf) < 8192:
-            more = client.recv(4096)
-            if not more:
-                break
-            buf += more
-    except Exception:
-        pass
-    finally:
-        try:
-            client.settimeout(None)
-        except Exception:
-            pass
-
-    try:
-        client.sendall(RESPONSE)
-    except Exception:
-        client.close(); backend.close(); return
-
-    try:
-        bridge(client, backend)
-    finally:
-        client.close(); backend.close()
-
-
+        try: c.settimeout(None)
+        except Exception: pass
+    try: c.sendall(RESP)
+    except Exception: c.close(); b.close(); return
+    try: bridge(c,b)
+    finally: c.close(); b.close()
 def main():
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((LISTEN_HOST, LISTEN_PORT))
-    srv.listen(1024)
-    print("dual-mode proxy on %s:%d -> SSH %s:%d" %
-          (LISTEN_HOST, LISTEN_PORT, BACKEND_HOST, BACKEND_PORT))
+    s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+    s.bind(LISTEN); s.listen(1024)
     while True:
         try:
-            client, _ = srv.accept()
-            threading.Thread(target=handle, args=(client,), daemon=True).start()
-        except Exception:
-            pass
-
-
-if __name__ == "__main__":
-    main()
+            c,_=s.accept()
+            threading.Thread(target=handle,args=(c,),daemon=True).start()
+        except Exception: pass
+main()
 PYEOF
+    chmod +x /usr/local/bin/ws-proxy.py
+    PROXY_EXEC="/usr/bin/python3 /usr/local/bin/ws-proxy.py"
+fi
 
-chmod +x /usr/local/bin/ws-proxy.py
-
-cat > /etc/systemd/system/ws-proxy.service <<'EOF'
+cat > /etc/systemd/system/ws-proxy.service <<EOF
 [Unit]
 Description=Dual-mode WebSocket/SSH proxy (port 80 -> Dropbear 109)
 After=network.target dropbear.service
@@ -306,7 +374,8 @@ After=network.target dropbear.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 /usr/local/bin/ws-proxy.py
+ExecStart=${PROXY_EXEC}
+LimitNOFILE=1048576
 Restart=always
 RestartSec=3
 
