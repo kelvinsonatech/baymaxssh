@@ -494,6 +494,104 @@ systemctl restart vnstat >/dev/null 2>&1 || true
 success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
 
 # ═══════════════════════════════════════════
+# SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
+#   These are installed but Xray itself stays OFF until activated in the menu.
+# ═══════════════════════════════════════════
+info "Installing Xray helper scripts (config generator + limit checker)..."
+
+# --- config generator: rebuilds Xray config from the accounts file --------
+cat > /usr/local/bin/xray-gen <<'XGEOF'
+#!/bin/bash
+CONF_DIR=/etc/ssh-panel
+XACC=/etc/xray/accounts.txt
+XCONF=/usr/local/etc/xray/config.json
+XP_WS_TLS=8443; XP_WS_NONE=8080; XP_HTTP_NONE=8081; XP_HTTP_TLS=8444; XP_SPLIT_TLS=8445; XP_SPLIT_NONE=8082
+XAPI=10085
+mkdir -p /etc/xray /usr/local/etc/xray; touch "$XACC"
+DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+HOST="${DOMAIN:-$(cat "$CONF_DIR/ip.conf" 2>/dev/null)}"
+if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"; KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+else
+    [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+        -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
+    CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
+fi
+clients=""; first=1
+while IFS='|' read -r rk id exp quota; do
+    [ -z "$id" ] && continue
+    [ $first -eq 0 ] && clients+=","
+    clients+="{\"id\":\"$id\",\"alterId\":0,\"email\":\"$rk\"}"; first=0
+done < "$XACC"
+tls="\"tlsSettings\":{\"certificates\":[{\"certificateFile\":\"$CERT\",\"keyFile\":\"$KEY\"}]},"
+cat > "$XCONF" <<JSON
+{
+  "log": {"loglevel": "warning"},
+  "stats": {},
+  "api": {"tag": "api", "services": ["HandlerService", "StatsService"]},
+  "policy": {"levels": {"0": {"statsUserUplink": true, "statsUserDownlink": true}}, "system": {"statsInboundUplink": true, "statsInboundDownlink": true}},
+  "inbounds": [
+    {"listen": "127.0.0.1", "port": $XAPI, "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1"}, "tag": "api"},
+    {"port": $XP_WS_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "ws", "security": "tls", ${tls} "wsSettings": {"path": "/vmess", "headers": {"Host": "$HOST"}}}},
+    {"port": $XP_WS_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/vmess"}}},
+    {"port": $XP_HTTP_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "tcp", "security": "none", "tcpSettings": {"header": {"type": "http", "request": {"path": ["/"], "headers": {"Host": ["$HOST"]}}}}}},
+    {"port": $XP_HTTP_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "tcp", "security": "tls", ${tls} "tcpSettings": {"header": {"type": "http", "request": {"path": ["/"], "headers": {"Host": ["$HOST"]}}}}}},
+    {"port": $XP_SPLIT_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "splithttp", "security": "tls", ${tls} "splithttpSettings": {"path": "/split", "host": "$HOST"}}},
+    {"port": $XP_SPLIT_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "splithttp", "security": "none", "splithttpSettings": {"path": "/split", "host": "$HOST"}}}
+  ],
+  "outbounds": [{"protocol": "freedom", "tag": "direct"}],
+  "routing": {"rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]}
+}
+JSON
+if systemctl is-enabled xray >/dev/null 2>&1; then systemctl restart xray >/dev/null 2>&1; fi
+XGEOF
+chmod +x /usr/local/bin/xray-gen
+
+# --- limit checker: drops expired / over-quota accounts, then regenerates --
+cat > /usr/local/bin/xray-check <<'XCEOF'
+#!/bin/bash
+XACC=/etc/xray/accounts.txt
+XAPI=127.0.0.1:10085
+[ -f "$XACC" ] || exit 0
+now=$(date +%s)
+tmp=$(mktemp); changed=0
+while IFS='|' read -r rk id exp quota; do
+    [ -z "$id" ] && continue
+    drop=0
+    # expiry check
+    if [ -n "$exp" ] && [ "$exp" != "never" ]; then
+        e=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+        [ "$e" -gt 0 ] && [ "$now" -ge "$e" ] && drop=1
+    fi
+    # quota check
+    if [ "$drop" -eq 0 ] && [ -n "$quota" ] && [ "$quota" -gt 0 ] 2>/dev/null; then
+        up=$(xray api stats --server=$XAPI -name "user>>>${rk}>>>traffic>>>uplink" 2>/dev/null | grep -o '[0-9]\+' | tail -1); up=${up:-0}
+        dn=$(xray api stats --server=$XAPI -name "user>>>${rk}>>>traffic>>>downlink" 2>/dev/null | grep -o '[0-9]\+' | tail -1); dn=${dn:-0}
+        [ $((up + dn)) -ge "$quota" ] && drop=1
+    fi
+    if [ "$drop" -eq 1 ]; then changed=1; else echo "${rk}|${id}|${exp}|${quota}" >> "$tmp"; fi
+done < "$XACC"
+if [ "$changed" -eq 1 ]; then mv "$tmp" "$XACC"; /usr/local/bin/xray-gen; else rm -f "$tmp"; fi
+XCEOF
+chmod +x /usr/local/bin/xray-check
+
+# --- cron: run the checker every 10 minutes ------------------------------
+cat > /etc/cron.d/xray-check <<'EOF'
+*/10 * * * * root /usr/local/bin/xray-check >/dev/null 2>&1
+EOF
+chmod 644 /etc/cron.d/xray-check
+command -v cron >/dev/null 2>&1 || eval "$APT cron" </dev/null >/dev/null 2>&1 || true
+systemctl enable cron >/dev/null 2>&1 || true
+systemctl restart cron >/dev/null 2>&1 || true
+success "Xray helper scripts installed (quota + expiry enforcement ready)"
+
+# ═══════════════════════════════════════════
 # SECTION 7 — INSTALL THE 'menu' COMMAND
 # ═══════════════════════════════════════════
 info "Installing management panel (menu command)..."
@@ -848,40 +946,15 @@ xray_paths() {
     fi
 }
 
-build_clients() {
-    local first=1 rk id out=""
-    while IFS='|' read -r rk id; do
-        [ -z "$id" ] && continue
-        [ $first -eq 0 ] && out+=","
-        out+="{\"id\":\"${id}\",\"alterId\":0}"
-        first=0
-    done < "$XACC"
-    echo "$out"
-}
+# Rebuild the Xray config from the accounts file (shared generator).
+rebuild_config() { /usr/local/bin/xray-gen >/dev/null 2>&1; }
 
-rebuild_config() {
-    local clients; clients=$(build_clients)
-    local tls="\"tlsSettings\":{\"certificates\":[{\"certificateFile\":\"$XR_CERT\",\"keyFile\":\"$XR_KEY\"}]},"
-    cat > "$XCONF" <<JSON
-{
-  "log": {"loglevel": "warning"},
-  "inbounds": [
-    {"port": $XP_WS_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
-     "streamSettings": {"network": "ws", "security": "tls", ${tls} "wsSettings": {"path": "/vmess", "headers": {"Host": "$XHOST"}}}},
-    {"port": $XP_WS_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
-     "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/vmess"}}},
-    {"port": $XP_HTTP_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
-     "streamSettings": {"network": "tcp", "security": "none", "tcpSettings": {"header": {"type": "http", "request": {"path": ["/"], "headers": {"Host": ["$XHOST"]}}}}}},
-    {"port": $XP_HTTP_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
-     "streamSettings": {"network": "tcp", "security": "tls", ${tls} "tcpSettings": {"header": {"type": "http", "request": {"path": ["/"], "headers": {"Host": ["$XHOST"]}}}}}},
-    {"port": $XP_SPLIT_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
-     "streamSettings": {"network": "splithttp", "security": "tls", ${tls} "splithttpSettings": {"path": "/split", "host": "$XHOST"}}},
-    {"port": $XP_SPLIT_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
-     "streamSettings": {"network": "splithttp", "security": "none", "splithttpSettings": {"path": "/split", "host": "$XHOST"}}}
-  ],
-  "outbounds": [{"protocol": "freedom"}]
-}
-JSON
+# Total traffic used by a remark (uplink+downlink), in bytes.
+xray_used() {
+    local up dn
+    up=$(xray api stats --server=127.0.0.1:10085 -name "user>>>$1>>>traffic>>>uplink" 2>/dev/null | grep -o '[0-9]\+' | tail -1)
+    dn=$(xray api stats --server=127.0.0.1:10085 -name "user>>>$1>>>traffic>>>downlink" 2>/dev/null | grep -o '[0-9]\+' | tail -1)
+    echo $(( ${up:-0} + ${dn:-0} ))
 }
 
 mkvmess() {  # ps port net type tls path
@@ -891,10 +964,18 @@ mkvmess() {  # ps port net type tls path
 
 show_vmess() {  # remark uuid
     local rk="$1"; UUID="$2"
+    local r i exp quota
+    while IFS='|' read -r r i exp quota; do [ "$r" = "$rk" ] && break; done < "$XACC"
     banner
     echo -e "  ${GR}Remark${NC} ${W}${rk}${NC}"
     echo -e "  ${GR}UUID${NC}   ${W}${UUID}${NC}"
     echo -e "  ${GR}Host${NC}   ${Y}${XHOST}${NC}"
+    echo -e "  ${GR}Expires${NC} ${W}${exp:-never}${NC}"
+    if [ -n "$quota" ] && [ "$quota" -gt 0 ] 2>/dev/null; then
+        echo -e "  ${GR}Quota${NC}  ${W}$(hb "$quota")${NC}   ${GR}Used${NC} ${W}$(hb "$(xray_used "$rk")")${NC}"
+    else
+        echo -e "  ${GR}Quota${NC}  ${W}Unlimited${NC}   ${GR}Used${NC} ${W}$(hb "$(xray_used "$rk")")${NC}"
+    fi
     local sep="  ${GR}──────────────────────────────────────────────────${NC}"
     echo -e "$sep"
     echo -e "  ${G}${BOLD}TLS${NC}        ${DIM}(ws · $XP_WS_TLS)${NC}\n  $(mkvmess "${rk}-TLS" $XP_WS_TLS ws none tls /vmess)"
@@ -929,11 +1010,16 @@ xray_activate() {
     xray_paths
     section "ACTIVATE XRAY / V2RAY (VMESS)" "$PINK"
     if ! xray_install; then err "Xray install failed — check the server's internet."; pause; return; fi
-    read -rp "$(echo -e "  ${C}Remark (name)${NC} : ")" REMARK
+    read -rp "$(echo -e "  ${C}Remark (name)${NC}         : ")" REMARK
     [ -z "$REMARK" ] && REMARK="vmess-$(date +%s)"
     REMARK=$(echo "$REMARK" | tr ' ' '-')
+    read -rp "$(echo -e "  ${C}Days valid (0=never)${NC}  : ")" XDAYS
+    if [[ "$XDAYS" =~ ^[0-9]+$ ]] && [ "$XDAYS" -gt 0 ]; then XEXP=$(date -d "+$XDAYS days" +%Y-%m-%d); else XEXP="never"; fi
+    read -rp "$(echo -e "  ${C}Quota GB (0=unlimited)${NC}: ")" XGB
+    [[ "$XGB" =~ ^[0-9]+$ ]] || XGB=0
+    XQUOTA=$(( XGB * 1024 * 1024 * 1024 ))
     UUID=$(cat /proc/sys/kernel/random/uuid)
-    echo "${REMARK}|${UUID}" >> "$XACC"
+    echo "${REMARK}|${UUID}|${XEXP}|${XQUOTA}" >> "$XACC"
     rebuild_config
     xray_open_ports
     systemctl enable xray >/dev/null 2>&1
@@ -953,12 +1039,14 @@ xray_list() {
     xray_paths
     section "XRAY ACCOUNTS" "$PINK"
     local col="$PINK"; line_top "$col"
-    row "$col" "$(printf '%-24s %s' 'REMARK' 'UUID')"
+    row "$col" "$(printf '%-16s %-11s %-9s %s' 'REMARK' 'EXPIRES' 'QUOTA' 'USED')"
     line_mid "$col"
-    local any=0 rk id
-    while IFS='|' read -r rk id; do
+    local any=0 rk id exp quota q u
+    while IFS='|' read -r rk id exp quota; do
         [ -z "$id" ] && continue; any=1
-        row "$col" "$(printf '%-24s ' "$rk")${GR}${id:0:8}…${NC}"
+        if [ -n "$quota" ] && [ "$quota" -gt 0 ] 2>/dev/null; then q=$(hb "$quota"); else q="∞"; fi
+        u=$(hb "$(xray_used "$rk")")
+        row "$col" "$(printf '%-16s %-11s %-9s %s' "$rk" "${exp:-never}" "$q" "$u")"
     done < "$XACC"
     [ $any -eq 0 ] && row "$col" "${GR}(no accounts yet — activate one first)${NC}"
     line_bot "$col"
@@ -966,7 +1054,7 @@ xray_list() {
     read -rp "$(echo -e "  ${C}Type a remark to show its links${NC} ${GR}(ENTER to skip)${NC} : ")" q
     if [ -n "$q" ]; then
         local found=""
-        while IFS='|' read -r rk id; do [ "$rk" = "$q" ] && found="$id"; done < "$XACC"
+        while IFS='|' read -r rk id exp quota; do [ "$rk" = "$q" ] && found="$id"; done < "$XACC"
         if [ -n "$found" ]; then show_vmess "$q" "$found"; else err "Remark not found."; fi
     fi
     pause
