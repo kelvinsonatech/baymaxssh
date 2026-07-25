@@ -794,9 +794,10 @@ renew_user() {
 
 service_status() {
     section "SERVICE STATUS" "$P"
-    local col="$P"
+    local col="$P" svcs="ssh dropbear ws-proxy stunnel4"
+    [ -f /usr/local/bin/xray ] && svcs="$svcs xray"
     line_top "$col"
-    for svc in ssh dropbear ws-proxy stunnel4; do
+    for svc in $svcs; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             row "$col" "${G}● RUNNING${NC}   ${W}$svc${NC}"
         else
@@ -819,6 +820,204 @@ restart_services() {
     pause
 }
 
+# ═══════════════════════════════════════════
+# XRAY / V2RAY (VMESS) — menu-activated, not auto-started
+# ═══════════════════════════════════════════
+XBIN=/usr/local/bin/xray
+XCONF=/usr/local/etc/xray/config.json
+XACC=/etc/xray/accounts.txt
+# Dedicated ports (no clash with 22/80/109/143/443/447)
+XP_WS_TLS=8443; XP_WS_NONE=8080
+XP_HTTP_NONE=8081; XP_HTTP_TLS=8444
+XP_SPLIT_TLS=8445; XP_SPLIT_NONE=8082
+
+xray_paths() {
+    mkdir -p /etc/xray /usr/local/etc/xray
+    touch "$XACC"
+    XDOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+    XIP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
+    XHOST="${XDOMAIN:-$XIP}"
+    XADDR="$XHOST"
+    if [ -n "$XDOMAIN" ] && [ -f "/etc/letsencrypt/live/$XDOMAIN/fullchain.pem" ]; then
+        XR_CERT="/etc/letsencrypt/live/$XDOMAIN/fullchain.pem"
+        XR_KEY="/etc/letsencrypt/live/$XDOMAIN/privkey.pem"
+    else
+        [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+            -subj "/CN=${XHOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
+        XR_CERT=/etc/xray/xray.crt; XR_KEY=/etc/xray/xray.key
+    fi
+}
+
+build_clients() {
+    local first=1 rk id out=""
+    while IFS='|' read -r rk id; do
+        [ -z "$id" ] && continue
+        [ $first -eq 0 ] && out+=","
+        out+="{\"id\":\"${id}\",\"alterId\":0}"
+        first=0
+    done < "$XACC"
+    echo "$out"
+}
+
+rebuild_config() {
+    local clients; clients=$(build_clients)
+    local tls="\"tlsSettings\":{\"certificates\":[{\"certificateFile\":\"$XR_CERT\",\"keyFile\":\"$XR_KEY\"}]},"
+    cat > "$XCONF" <<JSON
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [
+    {"port": $XP_WS_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "ws", "security": "tls", ${tls} "wsSettings": {"path": "/vmess", "headers": {"Host": "$XHOST"}}}},
+    {"port": $XP_WS_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": "/vmess"}}},
+    {"port": $XP_HTTP_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "tcp", "security": "none", "tcpSettings": {"header": {"type": "http", "request": {"path": ["/"], "headers": {"Host": ["$XHOST"]}}}}}},
+    {"port": $XP_HTTP_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "tcp", "security": "tls", ${tls} "tcpSettings": {"header": {"type": "http", "request": {"path": ["/"], "headers": {"Host": ["$XHOST"]}}}}}},
+    {"port": $XP_SPLIT_TLS, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "splithttp", "security": "tls", ${tls} "splithttpSettings": {"path": "/split", "host": "$XHOST"}}},
+    {"port": $XP_SPLIT_NONE, "protocol": "vmess", "settings": {"clients": [${clients}]},
+     "streamSettings": {"network": "splithttp", "security": "none", "splithttpSettings": {"path": "/split", "host": "$XHOST"}}}
+  ],
+  "outbounds": [{"protocol": "freedom"}]
+}
+JSON
+}
+
+mkvmess() {  # ps port net type tls path
+    local j="{\"v\":\"2\",\"ps\":\"$1\",\"add\":\"${XADDR}\",\"port\":\"$2\",\"id\":\"${UUID}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"$3\",\"type\":\"$4\",\"host\":\"${XHOST}\",\"path\":\"$6\",\"tls\":\"$5\",\"sni\":\"${XHOST}\"}"
+    echo "vmess://$(printf '%s' "$j" | base64 -w0)"
+}
+
+show_vmess() {  # remark uuid
+    local rk="$1"; UUID="$2"
+    banner
+    echo -e "  ${GR}Remark${NC} ${W}${rk}${NC}"
+    echo -e "  ${GR}UUID${NC}   ${W}${UUID}${NC}"
+    echo -e "  ${GR}Host${NC}   ${Y}${XHOST}${NC}"
+    local sep="  ${GR}──────────────────────────────────────────────────${NC}"
+    echo -e "$sep"
+    echo -e "  ${G}${BOLD}TLS${NC}        ${DIM}(ws · $XP_WS_TLS)${NC}\n  $(mkvmess "${rk}-TLS" $XP_WS_TLS ws none tls /vmess)"
+    echo -e "$sep"
+    echo -e "  ${G}${BOLD}NoneTLS${NC}    ${DIM}(ws · $XP_WS_NONE)${NC}\n  $(mkvmess "${rk}-NoneTLS" $XP_WS_NONE ws none "" /vmess)"
+    echo -e "$sep"
+    echo -e "  ${G}${BOLD}HTTP None${NC}  ${DIM}(tcp · $XP_HTTP_NONE)${NC}\n  $(mkvmess "${rk}-HTTP-None" $XP_HTTP_NONE tcp http "" /)"
+    echo -e "$sep"
+    echo -e "  ${G}${BOLD}HTTP TLS${NC}   ${DIM}(tcp · $XP_HTTP_TLS)${NC}\n  $(mkvmess "${rk}-HTTP-TLS" $XP_HTTP_TLS tcp http tls /)"
+    echo -e "$sep"
+    echo -e "  ${G}${BOLD}SLIT TLS${NC}   ${DIM}(split · $XP_SPLIT_TLS)${NC}\n  $(mkvmess "${rk}-SPLIT-TLS" $XP_SPLIT_TLS splithttp none tls /split)"
+    echo -e "$sep"
+    echo -e "  ${G}${BOLD}SPLIT HTTP${NC} ${DIM}(split · $XP_SPLIT_NONE)${NC}\n  $(mkvmess "${rk}-SPLIT-HTTP" $XP_SPLIT_NONE splithttp none "" /split)"
+    echo -e "$sep"
+}
+
+xray_open_ports() {
+    command -v ufw >/dev/null 2>&1 || return
+    for P in $XP_WS_TLS $XP_WS_NONE $XP_HTTP_NONE $XP_HTTP_TLS $XP_SPLIT_TLS $XP_SPLIT_NONE; do
+        ufw allow ${P}/tcp >/dev/null 2>&1
+    done
+}
+
+xray_install() {
+    [ -f "$XBIN" ] && return 0
+    note "Installing Xray-core (needs internet)..."
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
+    [ -f "$XBIN" ]
+}
+
+xray_activate() {
+    xray_paths
+    section "ACTIVATE XRAY / V2RAY (VMESS)" "$PINK"
+    if ! xray_install; then err "Xray install failed — check the server's internet."; pause; return; fi
+    read -rp "$(echo -e "  ${C}Remark (name)${NC} : ")" REMARK
+    [ -z "$REMARK" ] && REMARK="vmess-$(date +%s)"
+    REMARK=$(echo "$REMARK" | tr ' ' '-')
+    UUID=$(cat /proc/sys/kernel/random/uuid)
+    echo "${REMARK}|${UUID}" >> "$XACC"
+    rebuild_config
+    xray_open_ports
+    systemctl enable xray >/dev/null 2>&1
+    systemctl restart xray >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet xray; then
+        ok "Xray is now ${G}ACTIVE${NC}."
+    else
+        err "Xray failed to start — check: journalctl -u xray"
+    fi
+    echo ""
+    show_vmess "$REMARK" "$UUID"
+    pause
+}
+
+xray_list() {
+    xray_paths
+    section "XRAY ACCOUNTS" "$PINK"
+    local col="$PINK"; line_top "$col"
+    row "$col" "$(printf '%-24s %s' 'REMARK' 'UUID')"
+    line_mid "$col"
+    local any=0 rk id
+    while IFS='|' read -r rk id; do
+        [ -z "$id" ] && continue; any=1
+        row "$col" "$(printf '%-24s ' "$rk")${GR}${id:0:8}…${NC}"
+    done < "$XACC"
+    [ $any -eq 0 ] && row "$col" "${GR}(no accounts yet — activate one first)${NC}"
+    line_bot "$col"
+    echo ""
+    read -rp "$(echo -e "  ${C}Type a remark to show its links${NC} ${GR}(ENTER to skip)${NC} : ")" q
+    if [ -n "$q" ]; then
+        local found=""
+        while IFS='|' read -r rk id; do [ "$rk" = "$q" ] && found="$id"; done < "$XACC"
+        if [ -n "$found" ]; then show_vmess "$q" "$found"; else err "Remark not found."; fi
+    fi
+    pause
+}
+
+xray_delete() {
+    xray_paths
+    section "DELETE XRAY ACCOUNT" "$R"
+    read -rp "$(echo -e "  ${C}Remark to delete${NC} : ")" q
+    if ! awk -F'|' -v r="$q" '$1==r{f=1} END{exit !f}' "$XACC" 2>/dev/null; then err "Remark not found."; pause; return; fi
+    awk -F'|' -v r="$q" '$1!=r' "$XACC" > "$XACC.tmp" && mv "$XACC.tmp" "$XACC"
+    rebuild_config
+    systemctl restart xray >/dev/null 2>&1
+    ok "Account '${W}$q${NC}' deleted."
+    pause
+}
+
+xray_menu() {
+    xray_paths
+    while true; do
+        section "XRAY / V2RAY (VMESS)" "$PINK"
+        local st col="$PINK"
+        if [ ! -f "$XBIN" ]; then st="${R}✗ not installed${NC}"
+        elif systemctl is-active --quiet xray 2>/dev/null; then st="${G}● active${NC}"
+        else st="${Y}○ installed (stopped)${NC}"; fi
+        line_top "$col"
+        row "$col" "${GR}STATUS${NC}  ${st}"
+        row "$col" "${GR}HOST${NC}    ${Y}${XHOST}${NC}"
+        row "$col" "${GR}ACCTS${NC}   ${C}$(grep -c '|' "$XACC" 2>/dev/null || echo 0)${NC}"
+        line_bot "$col"
+        echo ""
+        menu_item "1" "⚡" "Activate & create VMess account" "$LIME"
+        menu_item "2" "📋" "Show accounts / links"          "$SKY"
+        menu_item "3" "🗑 " "Delete account"                 "$R"
+        menu_item "4" "▶ " "Start Xray"                      "$G"
+        menu_item "5" "⏹ " "Stop Xray"                       "$Y"
+        menu_item "0" "↩ " "Back to main menu"              "$GR"
+        echo ""
+        read -rp "$(echo -e "  ${P}❯${NC} select : ")" o
+        case "$o" in
+            1) xray_activate ;;
+            2) xray_list ;;
+            3) xray_delete ;;
+            4) systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; ok "Xray started."; sleep 1 ;;
+            5) systemctl stop xray >/dev/null 2>&1; ok "Xray stopped."; sleep 1 ;;
+            0) break ;;
+            *) err "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
 menu_item() {  # menu_item NUM ICON "Label" color
     echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
 }
@@ -835,7 +1034,8 @@ while true; do
     menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
     menu_item "7" "📊" "Service status"           "$C"
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
-    menu_item "9" "🔄" "Restart all services"     "$Y"
+    menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
+    menu_item "10" "🔄" "Restart all services"    "$Y"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -848,7 +1048,8 @@ while true; do
         6) renew_user ;;
         7) service_status ;;
         8) bandwidth ;;
-        9) restart_services ;;
+        9) xray_menu ;;
+        10) restart_services ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
