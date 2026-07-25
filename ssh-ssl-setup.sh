@@ -409,6 +409,22 @@ else
 fi
 
 # ═══════════════════════════════════════════
+# SECTION 6b — BANDWIDTH MONITOR (vnstat)
+# ═══════════════════════════════════════════
+info "Installing bandwidth monitor (vnstat)..."
+eval "$APT vnstat" </dev/null >/dev/null 2>&1 || true
+# Detect the primary network interface and register it with vnstat.
+PRIMARY_IFACE=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+[ -z "$PRIMARY_IFACE" ] && PRIMARY_IFACE=$(ls /sys/class/net 2>/dev/null | grep -v lo | head -n1)
+if [ -n "$PRIMARY_IFACE" ]; then
+    echo "$PRIMARY_IFACE" > "$CONF_DIR/iface.conf"
+    vnstat --add -i "$PRIMARY_IFACE" >/dev/null 2>&1 || true
+fi
+systemctl enable vnstat >/dev/null 2>&1 || true
+systemctl restart vnstat >/dev/null 2>&1 || true
+success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
+
+# ═══════════════════════════════════════════
 # SECTION 7 — INSTALL THE 'menu' COMMAND
 # ═══════════════════════════════════════════
 info "Installing management panel (menu command)..."
@@ -478,6 +494,40 @@ count_online() {
     echo "$n"
 }
 
+# ── bandwidth helpers ───────────────────────────────────
+IFACE=$(cat "$CONF_DIR/iface.conf" 2>/dev/null)
+[ -z "$IFACE" ] && IFACE=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+[ -z "$IFACE" ] && IFACE=$(ls /sys/class/net 2>/dev/null | grep -v lo | head -n1)
+
+hb() { numfmt --to=iec --suffix=B --format="%.2f" "${1:-0}" 2>/dev/null || echo "${1:-0} B"; }
+
+# Prints "rx tx total" in bytes for all-time usage.
+# Uses vnstat (persists across reboots); falls back to /sys counters (since boot).
+bw_alltime() {
+    local rx tx line
+    if command -v vnstat >/dev/null 2>&1; then
+        line=$(vnstat -i "$IFACE" --oneline b 2>/dev/null)
+        rx=$(echo "$line" | cut -d';' -f13)
+        tx=$(echo "$line" | cut -d';' -f14)
+    fi
+    if ! [[ "$rx" =~ ^[0-9]+$ ]] || ! [[ "$tx" =~ ^[0-9]+$ ]]; then
+        rx=$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
+        tx=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
+    fi
+    echo "$rx $tx $((rx + tx))"
+}
+
+# Prints "rx tx total" in bytes for a vnstat period label: d (today) or m (month).
+bw_period() {
+    local p="$1" line rx tx f
+    command -v vnstat >/dev/null 2>&1 || { echo "0 0 0"; return; }
+    line=$(vnstat -i "$IFACE" --oneline b 2>/dev/null)
+    if [ "$p" = "d" ]; then rx=$(echo "$line" | cut -d';' -f4);  tx=$(echo "$line" | cut -d';' -f5)
+    else                    rx=$(echo "$line" | cut -d';' -f9);  tx=$(echo "$line" | cut -d';' -f10); fi
+    [[ "$rx" =~ ^[0-9]+$ ]] || rx=0; [[ "$tx" =~ ^[0-9]+$ ]] || tx=0
+    echo "$rx $tx $((rx + tx))"
+}
+
 banner() {
     clear
     echo ""
@@ -498,6 +548,8 @@ status_bar() {
     line_mid "$col"
     row "$col" "${GR}HOST${NC}    ${Y}${HOST_DISPLAY}${NC}"
     row "$col" "${GR}USERS${NC}   ${C}$(count_users)${NC} total   ${LIME}$(count_online)${NC} online"
+    read -r _rx _tx _tot <<<"$(bw_alltime)"
+    row "$col" "${GR}NET${NC}     ${SKY}↓$(hb "$_rx")${NC}  ${ORANGE}↑$(hb "$_tx")${NC}  ${W}Σ $(hb "$_tot")${NC}"
     local svcline="${GR}SVC${NC}    "
     for s in ssh dropbear ws-proxy stunnel4; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
@@ -624,6 +676,28 @@ online_users() {
     pause
 }
 
+bandwidth() {
+    section "BANDWIDTH USAGE" "$SKY"
+    local col="$SKY"
+    read -r trx ttx ttot <<<"$(bw_period d)"
+    read -r mrx mtx mtot <<<"$(bw_period m)"
+    read -r arx atx atot <<<"$(bw_alltime)"
+    line_top "$col"
+    crow "$col" "${W}${BOLD}INTERFACE: ${IFACE:-unknown}${NC}"
+    line_mid "$col"
+    row "$col" "$(printf '%-9s' 'PERIOD')${SKY}$(printf '%12s' 'DOWN ↓')${NC}${ORANGE}$(printf '%12s' 'UP ↑')${NC}${W}$(printf '%14s' 'TOTAL Σ')${NC}"
+    line_mid "$col"
+    row "$col" "$(printf '%-9s' 'Today')${SKY}$(printf '%12s' "$(hb "$trx")")${NC}${ORANGE}$(printf '%12s' "$(hb "$ttx")")${NC}${W}$(printf '%14s' "$(hb "$ttot")")${NC}"
+    row "$col" "$(printf '%-9s' 'Month')${SKY}$(printf '%12s' "$(hb "$mrx")")${NC}${ORANGE}$(printf '%12s' "$(hb "$mtx")")${NC}${W}$(printf '%14s' "$(hb "$mtot")")${NC}"
+    line_mid "$col"
+    row "$col" "$(printf '%-9s' 'ALL TIME')${SKY}$(printf '%12s' "$(hb "$arx")")${NC}${ORANGE}$(printf '%12s' "$(hb "$atx")")${NC}${W}$(printf '%14s' "$(hb "$atot")")${NC}"
+    line_bot "$col"
+    if ! command -v vnstat >/dev/null 2>&1; then
+        note "vnstat not installed — showing since-boot counters only."
+    fi
+    pause
+}
+
 change_password() {
     section "CHANGE PASSWORD" "$ORANGE"
     read -rp "$(echo -e "  ${C}Username${NC}     : ")" USERNAME
@@ -693,7 +767,8 @@ while true; do
     menu_item "5" "🔑" "Change user password"     "$ORANGE"
     menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
     menu_item "7" "📊" "Service status"           "$C"
-    menu_item "8" "🔄" "Restart all services"     "$Y"
+    menu_item "8" "📶" "Bandwidth usage"          "$SKY"
+    menu_item "9" "🔄" "Restart all services"     "$Y"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -705,7 +780,8 @@ while true; do
         5) change_password ;;
         6) renew_user ;;
         7) service_status ;;
-        8) restart_services ;;
+        8) bandwidth ;;
+        9) restart_services ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
