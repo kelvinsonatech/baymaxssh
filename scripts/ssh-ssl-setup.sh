@@ -505,11 +505,61 @@ mkdir -p /etc/slowdns
 SDNS_DIR=/etc/slowdns
 SDNS_BIN=/usr/local/bin/dns-server
 
-# Fetch the dnstt server binary (best-effort; can also be installed later on activation).
-if [ ! -x "$SDNS_BIN" ]; then
-    curl -sL -o "$SDNS_BIN" "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/dns-server" 2>/dev/null \
-        && chmod +x "$SDNS_BIN" 2>/dev/null || true
+# Installed helper: obtains a WORKING dns-server binary for this CPU.
+# It validates any download (must be an ELF binary) and falls back to
+# compiling dnstt from source with Go — guaranteeing the right architecture.
+cat > /usr/local/bin/slowdns-fetch <<'SFEOF'
+#!/bin/bash
+SDNS_BIN=/usr/local/bin/dns-server
+is_elf() { [ -f "$1" ] && [ "$(head -c4 "$1" 2>/dev/null | tr -d '\0')" = "$(printf 'ELF')" ]; }
+
+# already have a valid, runnable binary?
+if is_elf "$SDNS_BIN" && "$SDNS_BIN" -gen-key -privkey-file /dev/null -pubkey-file /dev/null >/dev/null 2>&1; then
+    exit 0
 fi
+
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64|amd64) GOA=amd64; SUF=amd64 ;;
+    aarch64|arm64) GOA=arm64; SUF=arm64 ;;
+    armv7l|armv6l) GOA=arm;   SUF=arm ;;
+    *) GOA=""; SUF="" ;;
+esac
+
+# Try prebuilt binaries (arch-matched) from known mirrors; validate each.
+if [ -n "$SUF" ]; then
+    for U in \
+        "https://github.com/fisabiliyusri/SLOW/raw/main/slowdns/dns-server-$SUF" \
+        "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/dns-server-$SUF"; do
+        curl -sfL -o "$SDNS_BIN.tmp" "$U" 2>/dev/null || continue
+        if is_elf "$SDNS_BIN.tmp"; then
+            mv "$SDNS_BIN.tmp" "$SDNS_BIN"; chmod +x "$SDNS_BIN"
+            if "$SDNS_BIN" -gen-key -privkey-file /dev/null -pubkey-file /dev/null >/dev/null 2>&1; then exit 0; fi
+        fi
+        rm -f "$SDNS_BIN.tmp"
+    done
+fi
+
+# Fallback: compile dnstt-server from source (needs Go; install if missing).
+echo "  Compiling SlowDNS from source (this can take a minute)..."
+if ! command -v go >/dev/null 2>&1; then
+    apt-get install -y golang-go >/dev/null 2>&1
+fi
+command -v go >/dev/null 2>&1 || { echo "  ERROR: Go not available; cannot build."; exit 1; }
+TMP=$(mktemp -d)
+if git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git "$TMP/dnstt" >/dev/null 2>&1; then
+    ( cd "$TMP/dnstt/dnstt-server" && go build -o "$SDNS_BIN" . >/dev/null 2>&1 )
+fi
+rm -rf "$TMP"
+if is_elf "$SDNS_BIN" && "$SDNS_BIN" -gen-key -privkey-file /dev/null -pubkey-file /dev/null >/dev/null 2>&1; then
+    chmod +x "$SDNS_BIN"; exit 0
+fi
+echo "  ERROR: could not obtain a working dns-server binary."; exit 1
+SFEOF
+chmod +x /usr/local/bin/slowdns-fetch
+
+# Best-effort fetch now (also runnable later from the menu on activation).
+/usr/local/bin/slowdns-fetch >/dev/null 2>&1 || true
 
 # Generate the DNSTT keypair once (public key is shared with clients).
 if [ ! -f "$SDNS_DIR/server.key" ] && [ -x "$SDNS_BIN" ]; then
@@ -1069,10 +1119,9 @@ slowdns_setup() {
     read -rp "$(echo -e "  ${C}NS domain${NC} : ")" NSVAL
     NSVAL=$(echo "$NSVAL" | tr -d '[:space:]')
     [ -z "$NSVAL" ] && { err "No NS entered."; pause; return; }
-    if [ ! -x "$SDNS_BIN" ]; then
-        note "Downloading SlowDNS server binary..."
-        curl -sL -o "$SDNS_BIN" "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/dns-server" 2>/dev/null && chmod +x "$SDNS_BIN"
-        [ -x "$SDNS_BIN" ] || { err "Download failed — check server internet."; pause; return; }
+    note "Obtaining a working SlowDNS binary for this server..."
+    if ! /usr/local/bin/slowdns-fetch; then
+        err "Could not obtain a working dns-server binary — check server internet."; pause; return
     fi
     if [ ! -f "$SDNS_DIR/server.key" ]; then
         "$SDNS_BIN" -gen-key -privkey-file "$SDNS_DIR/server.key" -pubkey-file "$SDNS_DIR/server.pub" >/dev/null 2>&1
