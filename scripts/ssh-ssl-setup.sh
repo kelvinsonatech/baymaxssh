@@ -1045,9 +1045,12 @@ slowdns_menu() {
         read -rp "$(echo -e "  ${P}❯${NC} select : ")" o
         case "$o" in
             1) slowdns_setup ;;
-            2) systemctl enable slowdns >/dev/null 2>&1; systemctl start slowdns >/dev/null 2>&1
-               sleep 1
-               if systemctl is-active --quiet slowdns; then ok "SlowDNS started."; else err "Failed to start — set an NS record first (option 1)."; fi; sleep 1 ;;
+            2) if [ ! -s "$SDNS_NSF" ]; then err "No NS set yet — use option 1 first."; sleep 2
+               else slowdns_free_port53; systemctl enable slowdns >/dev/null 2>&1; systemctl restart slowdns >/dev/null 2>&1
+                    sleep 1
+                    if systemctl is-active --quiet slowdns; then ok "SlowDNS started."
+                    else err "Failed to start. Last log lines:"; journalctl -u slowdns -n 8 --no-pager 2>/dev/null | sed 's/^/    /'; pause; fi
+               fi; sleep 1 ;;
             3) systemctl stop slowdns >/dev/null 2>&1; ok "SlowDNS stopped."; sleep 1 ;;
             4) slowdns_info ;;
             0) break ;;
@@ -1076,6 +1079,7 @@ slowdns_setup() {
     fi
     echo "NS=$NSVAL" > "$SDNS_NSF"
     command -v ufw >/dev/null 2>&1 && { ufw allow 53/udp >/dev/null 2>&1; ufw allow 53/tcp >/dev/null 2>&1; }
+    slowdns_free_port53
     systemctl daemon-reload >/dev/null 2>&1
     systemctl enable slowdns >/dev/null 2>&1
     systemctl restart slowdns >/dev/null 2>&1
@@ -1083,9 +1087,29 @@ slowdns_setup() {
     if systemctl is-active --quiet slowdns; then
         ok "SlowDNS ${G}ACTIVE${NC} on NS ${W}${NSVAL}${NC}."
     else
-        err "SlowDNS failed to start — check: journalctl -u slowdns"
+        err "SlowDNS failed to start. Last log lines:"
+        journalctl -u slowdns -n 8 --no-pager 2>/dev/null | sed 's/^/    /'
     fi
     slowdns_info
+}
+
+# Free UDP/53 from systemd-resolved so SlowDNS can bind it.
+slowdns_free_port53() {
+    if ss -lunp 2>/dev/null | grep -q ':53 '; then
+        if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+            note "Port 53 is used by systemd-resolved — freeing it for SlowDNS..."
+            mkdir -p /etc/systemd/resolved.conf.d
+            cat > /etc/systemd/resolved.conf.d/slowdns.conf <<'RSVEOF'
+[Resolve]
+DNSStubListener=no
+RSVEOF
+            # keep working DNS resolution for the server itself
+            ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
+            [ -s /etc/resolv.conf ] || echo "nameserver 1.1.1.1" > /etc/resolv.conf
+            systemctl restart systemd-resolved >/dev/null 2>&1
+            sleep 1
+        fi
+    fi
 }
 
 slowdns_info() {
