@@ -8,8 +8,8 @@
 #   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (SSL payload)
 #   447  — SSL/TLS  (stunnel) -> OpenSSH direct
 #   22   — OpenSSH  (management / direct)
-#   109  — Dropbear (direct)
-#   143  — Dropbear (direct alt)
+#   109  — OpenSSH  (direct)
+#   143  — OpenSSH  (direct alt)
 #
 # The port-80 proxy is DUAL MODE:
 #   * If the client sends an HTTP/WebSocket payload, it replies
@@ -117,6 +117,10 @@ apply_sshd_setting() {
 }
 
 apply_sshd_setting "Port"                    "22"
+# OpenSSH also listens on the former Dropbear direct ports so those endpoints keep working.
+for XP in 109 143; do
+    grep -qxF "Port ${XP}" "$SSHD_CONF" || echo "Port ${XP}" >> "$SSHD_CONF"
+done
 apply_sshd_setting "PermitRootLogin"         "yes"
 apply_sshd_setting "PasswordAuthentication"  "yes"
 apply_sshd_setting "AllowTcpForwarding"      "yes"
@@ -131,32 +135,15 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 success "OpenSSH configured on port 22"
 
 # ═══════════════════════════════════════════
-# SECTION 2 — DROPBEAR (direct SSH targets)
+# SECTION 2 — TUNNEL-ONLY SHELLS
 # ═══════════════════════════════════════════
-info "Installing Dropbear (ports 109 & 143)..."
-eval "$APT dropbear" </dev/null >/dev/null 2>&1
-
-mkdir -p /etc/dropbear
-for TYPE in dss rsa ecdsa ed25519; do
-    KEYFILE="/etc/dropbear/dropbear_${TYPE}_host_key"
-    [ -f "$KEYFILE" ] || dropbearkey -t "$TYPE" -f "$KEYFILE" >/dev/null 2>&1 || true
-done
-
-# Dropbear (and OpenSSH) accept tunnel-only accounts whose shell is /bin/false.
+# OpenSSH accepts tunnel-only accounts whose shell is /bin/false.
 grep -qxF '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells
 grep -qxF '/usr/sbin/nologin' /etc/shells || echo '/usr/sbin/nologin' >> /etc/shells
 
-cat > /etc/default/dropbear <<'EOF'
-NO_START=0
-DROPBEAR_PORT=109
-DROPBEAR_EXTRA_ARGS="-p 143 -I 300 -K 30"
-DROPBEAR_BANNER=""
-DROPBEAR_RECEIVE_WINDOW=65536
-EOF
-
-systemctl enable dropbear >/dev/null 2>&1 || true
-systemctl restart dropbear
-success "Dropbear running on ports 109 and 143"
+# Remove Dropbear if a previous install left it behind — OpenSSH now serves all ports.
+systemctl disable --now dropbear >/dev/null 2>&1 || true
+success "OpenSSH now serves direct ports 22, 109 and 143"
 
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
@@ -187,7 +174,7 @@ cat > "$BUILD_DIR/main.go" <<'GOEOF'
 //   * If nothing arrives quickly, it assumes a direct SSH client waiting
 //     for the banner and tunnels straight through.
 //
-// Backend SSH = Dropbear on 127.0.0.1:109.
+// Backend SSH = OpenSSH on 127.0.0.1:22.
 package main
 
 import (
@@ -200,7 +187,7 @@ import (
 
 const (
 	listenAddr  = "0.0.0.0:80"
-	backendAddr = "127.0.0.1:109"
+	backendAddr = "127.0.0.1:22"
 	peekTimeout = 3 * time.Second
 )
 
@@ -308,7 +295,7 @@ else
     cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
 import socket, threading
-BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=3
+BACKEND=('127.0.0.1',22); LISTEN=('0.0.0.0',80); T=3
 RESP=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 def pipe(s,d):
     try:
@@ -378,8 +365,8 @@ fi
 
 cat > /etc/systemd/system/ws-proxy.service <<EOF
 [Unit]
-Description=Dual-mode WebSocket/SSH proxy (port 80 -> Dropbear 109)
-After=network.target dropbear.service
+Description=Dual-mode WebSocket/SSH proxy (port 80 -> OpenSSH 22)
+After=network.target ssh.service
 
 [Service]
 Type=simple
@@ -770,7 +757,7 @@ banner() {
     echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
     echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
     echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
-    echo -e "        ${GR}ws · ssl · dropbear · openssh manager${NC}"
+    echo -e "        ${GR}ws · ssl · openssh manager${NC}"
     echo ""
 }
 
@@ -784,7 +771,7 @@ status_bar() {
     read -r _rx _tx _tot <<<"$(bw_alltime)"
     row "$col" "${GR}DATA${NC}    ${W}${BOLD}$(hb "$_tot")${NC} ${GR}used${NC}"
     local svcline="${GR}SVC${NC}    "
-    for s in ssh dropbear ws-proxy stunnel4; do
+    for s in ssh ws-proxy stunnel4; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
         svcline+="${dot} ${s}   "
     done
@@ -800,8 +787,7 @@ show_ports() {
     row "$col" "${LIME}▸${NC} WebSocket (payload)  ${GR}→${NC} ${W}${HOST_DISPLAY}:80${NC}"
     row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443${NC}"
     row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
-    row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
-    row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
+    row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22 / 109 / 143${NC}"
     line_bot "$col"
 }
 
@@ -959,7 +945,7 @@ renew_user() {
 
 service_status() {
     section "SERVICE STATUS" "$P"
-    local col="$P" svcs="ssh dropbear ws-proxy stunnel4"
+    local col="$P" svcs="ssh ws-proxy stunnel4"
     [ -f /usr/local/bin/xray ] && svcs="$svcs xray"
     line_top "$col"
     for svc in $svcs; do
@@ -978,7 +964,6 @@ restart_services() {
     section "RESTART ALL SERVICES" "$ORANGE"
     note "Restarting services, please wait..."
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-    systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
     systemctl restart stunnel4 2>/dev/null
     ok "All services restarted."
@@ -1452,8 +1437,7 @@ echo -e "  ${BCyan}Installed services & ports:${NC}"
 echo -e "    WebSocket (payload)  → 80"
 echo -e "    SSL + payload (TLS)  → 443"
 echo -e "    SSL direct SSH (TLS) → 447"
-echo -e "    OpenSSH              → 22"
-echo -e "    Dropbear             → 109, 143"
+echo -e "    OpenSSH              → 22, 109, 143"
 echo ""
 echo -e "  ${BCyan}Default SSH users (pass: 0000, valid ${DEFAULT_USER_DAYS} days):${NC}"
 echo -e "    boew · caen · xeon · haje · pein"
