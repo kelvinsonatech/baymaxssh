@@ -1479,7 +1479,7 @@ info "Creating default SSH users..."
 DEFAULT_USER_PASS="0000"
 DEFAULT_USER_DAYS=30
 DEFAULT_USER_EXP=$(date -d "+${DEFAULT_USER_DAYS} days" +"%Y-%m-%d")
-for U in deon febo geto weon ceon; do
+for U in boew caen xeon haje pein; do
     if id "$U" >/dev/null 2>&1; then
         info "User '$U' already exists — skipped"
     else
@@ -1512,7 +1512,7 @@ echo -e "    OpenSSH              → 22"
 echo -e "    Dropbear             → 109, 143"
 echo ""
 echo -e "  ${BCyan}Default SSH users (pass: 0000, valid ${DEFAULT_USER_DAYS} days):${NC}"
-echo -e "    deon · febo · geto · weon · ceon"
+echo -e "    boew · caen · xeon · haje · pein"
 echo ""
 echo -e "  ${BCyan}Client tips:${NC}"
 echo -e "    WebSocket payload : GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
