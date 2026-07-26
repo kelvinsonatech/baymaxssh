@@ -249,7 +249,16 @@ func handle(client net.Conn) {
 		return
 	}
 
-	// HTTP / WebSocket payload: read the rest of the request headers.
+	// HTTP / WebSocket payload: reply 101 IMMEDIATELY so the client proceeds
+	// without waiting. This is the key to fast, reliable connects.
+	if _, err := client.Write(response); err != nil {
+		client.Close()
+		backend.Close()
+		return
+	}
+
+	// Consume the rest of the HTTP headers; anything after the blank line
+	// (\r\n\r\n) is real SSH data and must be forwarded to the backend.
 	buf := append([]byte{}, head...)
 	for !bytes.Contains(buf, []byte("\r\n\r\n")) && len(buf) < 8192 {
 		client.SetReadDeadline(time.Now().Add(peekTimeout))
@@ -262,13 +271,11 @@ func handle(client net.Conn) {
 			break
 		}
 	}
-
-	if _, err := client.Write(response); err != nil {
-		client.Close()
-		backend.Close()
-		return
+	var leftover []byte
+	if idx := bytes.Index(buf, []byte("\r\n\r\n")); idx >= 0 {
+		leftover = buf[idx+4:]
 	}
-	bridge(client, backend, nil)
+	bridge(client, backend, leftover)
 }
 
 func main() {
@@ -346,6 +353,9 @@ def handle(c):
         try: bridge(c,b,f)
         finally: c.close(); b.close()
         return
+    # Payload: reply 101 IMMEDIATELY, then drain headers and forward leftovers.
+    try: c.sendall(RESP)
+    except Exception: c.close(); b.close(); return
     buf=f
     try:
         c.settimeout(T)
@@ -357,9 +367,9 @@ def handle(c):
     finally:
         try: c.settimeout(None)
         except Exception: pass
-    try: c.sendall(RESP)
-    except Exception: c.close(); b.close(); return
-    try: bridge(c,b)
+    i=buf.find(b"\r\n\r\n")
+    leftover=buf[i+4:] if i>=0 else b""
+    try: bridge(c,b,leftover)
     finally: c.close(); b.close()
 def main():
     s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
