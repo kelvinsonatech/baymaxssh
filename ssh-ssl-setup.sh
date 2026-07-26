@@ -929,6 +929,22 @@ change_password() {
     pause
 }
 
+change_root_password() {
+    section "CHANGE SERVER (ROOT) PASSWORD" "$R"
+    row "$R" "${Y}This changes the root/SSH login password for THIS server.${NC}"
+    echo ""
+    read -rp "$(echo -e "  ${C}New root password${NC} : ")" RPASS
+    [ -z "$RPASS" ] && { err "Password cannot be empty."; pause; return; }
+    read -rp "$(echo -e "  ${C}Confirm password${NC}  : ")" RPASS2
+    [ "$RPASS" != "$RPASS2" ] && { err "Passwords do not match."; pause; return; }
+    if echo -e "${RPASS}\n${RPASS}" | passwd root >/dev/null 2>&1; then
+        ok "Root password updated. Use it on your next SSH login."
+    else
+        err "Failed to change root password."
+    fi
+    pause
+}
+
 renew_user() {
     section "RENEW / EXTEND ACCOUNT" "$VIOLET"
     read -rp "$(echo -e "  ${C}Username${NC} : ")" USERNAME
@@ -1378,6 +1394,7 @@ while true; do
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
+    menu_item "11" "🔐" "Change server password"  "$R"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1392,6 +1409,7 @@ while true; do
         8) bandwidth ;;
         9) xray_menu ;;
         10) restart_services ;;
+        11) change_root_password ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
