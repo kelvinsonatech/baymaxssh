@@ -201,7 +201,8 @@ import (
 const (
 	listenAddr  = "0.0.0.0:80"
 	backendAddr = "127.0.0.1:109"
-	peekTimeout = 3 * time.Second
+	peekTimeout = 400 * time.Millisecond
+	drainTimeout = 200 * time.Millisecond
 )
 
 var response = []byte("HTTP/1.1 101 Switching Protocols\r\n" +
@@ -261,7 +262,7 @@ func handle(client net.Conn) {
 	// (\r\n\r\n) is real SSH data and must be forwarded to the backend.
 	buf := append([]byte{}, head...)
 	for !bytes.Contains(buf, []byte("\r\n\r\n")) && len(buf) < 8192 {
-		client.SetReadDeadline(time.Now().Add(peekTimeout))
+		client.SetReadDeadline(time.Now().Add(drainTimeout))
 		m, e := client.Read(first)
 		client.SetReadDeadline(time.Time{})
 		if m > 0 {
@@ -315,7 +316,7 @@ else
     cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
 import socket, threading
-BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=3
+BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=0.4; TD=0.2
 RESP=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 def pipe(s,d):
     try:
@@ -358,7 +359,7 @@ def handle(c):
     except Exception: c.close(); b.close(); return
     buf=f
     try:
-        c.settimeout(T)
+        c.settimeout(TD)
         while b"\r\n\r\n" not in buf and len(buf)<8192:
             m=c.recv(4096)
             if not m: break
