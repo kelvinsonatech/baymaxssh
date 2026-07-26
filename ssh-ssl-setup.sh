@@ -1466,3 +1466,24 @@ echo -e "${BGreen}============================================================${
 echo -e "${BYellow}   Type ${BGreen}menu${BYellow} to open the panel and create users.${NC}"
 echo -e "${BGreen}============================================================${NC}"
 echo ""
+
+# ═══════════════════════════════════════════
+# SELF-CLEANUP — remove traces from shell history & disk
+# ═══════════════════════════════════════════
+info "Cleaning install traces from server history..."
+# 1) Delete any downloaded copy of this installer.
+[ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ] && rm -f "${BASH_SOURCE[0]}" 2>/dev/null
+for f in ssh-ssl-setup.sh /root/ssh-ssl-setup.sh /tmp/ssh-ssl-setup.sh; do
+    [ -f "$f" ] && rm -f "$f" 2>/dev/null
+done
+# 2) Scrub install command lines from every shell history file we can find.
+for H in /root/.bash_history "$HOME/.bash_history" /root/.zsh_history "$HOME/.zsh_history" \
+         /root/.ash_history "$HOME/.ash_history" /root/.local/share/fish/fish_history; do
+    [ -f "$H" ] || continue
+    sed -i -E '/(ssh-ssl-setup\.sh|raw\.githubusercontent\.com\/kelvinsonatech\/myssh)/d' "$H" 2>/dev/null
+done
+# 3) Drop the current session's in-memory history so it can't be flushed back.
+history -c 2>/dev/null || true
+: > "${HISTFILE:-/root/.bash_history}" 2>/dev/null || true
+success "Install traces removed from history"
+echo ""
