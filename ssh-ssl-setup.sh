@@ -42,25 +42,68 @@ STUNNEL_CERT=/etc/stunnel/stunnel.pem
 # ASK FOR DOMAIN
 # ═══════════════════════════════════════════
 clear
-echo -e "${BGreen}============================================${NC}"
-echo -e "${BCyan}    SSH + WEBSOCKET + SSL VPN INSTALLER      ${NC}"
-echo -e "${BGreen}============================================${NC}"
+# ── framed header ──────────────────────────────────────
+BOX_W=58
+_bx_line() { printf "${BCyan}%s${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
+_bx_top()  { printf "${BCyan}╭%s╮${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
+_bx_bot()  { printf "${BCyan}╰%s╯${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
+_bx_mid()  { printf "${BCyan}├%s┤${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
+_bx_row()  {  # centered plain text (no ansi inside)
+    local t="$1" len l r; len=${#t}
+    l=$(( (BOX_W - len) / 2 )); r=$(( BOX_W - len - l ))
+    (( l < 0 )) && l=0; (( r < 0 )) && r=0
+    printf "${BCyan}│${NC}%*s${BYellow}%s${NC}%*s${BCyan}│${NC}\n" "$l" "" "$t" "$r" ""
+}
 echo ""
-echo -e "${BYellow}Enter your domain name (pointed at this server's IP).${NC}"
-echo -e "${BYellow}Leave blank to use a self-signed certificate.${NC}"
+_bx_top
+_bx_row "SSH + WEBSOCKET + SSL VPN INSTALLER"
+_bx_mid
+_bx_row "Point your domain(s) at this server's IP first."
+_bx_row "You can use multiple domains on one server."
+_bx_bot
 echo ""
-read -rp "  Domain: " DOMAIN
-DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
 
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+echo -e "  ${BCyan}This server's IP:${NC} ${BGreen}${SERVER_IP}${NC}\n"
+
+# ── how many domains ───────────────────────────────────
+echo -e "  ${BYellow}How many domains will you use?${NC}"
+echo -e "  ${BCyan}(enter 0 for a self-signed certificate / no domain)${NC}"
+read -rp "$(echo -e "  ${BGreen}❯${NC} count : ")" DCOUNT
+[[ "$DCOUNT" =~ ^[0-9]+$ ]] || DCOUNT=0
+
+DOMAINS=()
+if [ "$DCOUNT" -gt 0 ]; then
+    echo ""
+    for i in $(seq 1 "$DCOUNT"); do
+        while :; do
+            read -rp "$(echo -e "  ${BGreen}❯${NC} domain ${BYellow}${i}${NC} : ")" d
+            d="$(echo "$d" | tr -d '[:space:]' | sed -E 's#^https?://##; s#/.*$##')"
+            if [ -z "$d" ]; then
+                warn "  Domain cannot be empty — try again."
+            elif [[ ! "$d" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+                warn "  '$d' doesn't look like a valid domain — try again."
+            else
+                DOMAINS+=("$d"); break
+            fi
+        done
+    done
+fi
+
+# First domain drives display/cert compatibility; all are stored for multi-cert.
+DOMAIN="${DOMAINS[0]:-}"
+printf '%s\n' "${DOMAINS[@]}" > "$CONF_DIR/domains.conf"
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
 
-if [ -n "$DOMAIN" ]; then
-    echo -e "\n${BGreen}Using domain:${NC} $DOMAIN"
+echo ""
+if [ "${#DOMAINS[@]}" -gt 0 ]; then
+    _bx_top; _bx_row "DOMAINS TO SECURE (${#DOMAINS[@]})"; _bx_mid
+    for d in "${DOMAINS[@]}"; do _bx_row "$d"; done
+    _bx_bot
 else
-    echo -e "\n${BYellow}No domain — a self-signed certificate will be used.${NC}"
+    warn "No domain entered — a self-signed certificate will be used."
 fi
 sleep 1
 
@@ -400,20 +443,28 @@ systemctl stop ws-proxy 2>/dev/null || true
 systemctl stop nginx 2>/dev/null || true
 systemctl stop apache2 2>/dev/null || true
 
-if [ -n "$DOMAIN" ]; then
-    info "Requesting Let's Encrypt certificate for $DOMAIN ..."
+# Load the full domain list (may be more than one).
+mapfile -t ALL_DOMAINS < "$CONF_DIR/domains.conf" 2>/dev/null || ALL_DOMAINS=()
+
+if [ "${#ALL_DOMAINS[@]}" -gt 0 ]; then
     eval "$APT certbot" </dev/null >/dev/null 2>&1 || true
-    certbot certonly --standalone -d "$DOMAIN" \
-        --non-interactive --agree-tos \
+    # Request one combined (SAN) certificate covering every domain.
+    CB_ARGS=(); for d in "${ALL_DOMAINS[@]}"; do CB_ARGS+=(-d "$d"); done
+    info "Requesting Let's Encrypt certificate for: ${ALL_DOMAINS[*]}"
+    certbot certonly --standalone "${CB_ARGS[@]}" \
+        --non-interactive --agree-tos --expand \
         --register-unsafely-without-email >/dev/null 2>&1 && LE_OK=1 || LE_OK=0
 
-    if [ "${LE_OK:-0}" -eq 1 ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    # Cert dir is named after the FIRST domain.
+    CERT_DOM="${ALL_DOMAINS[0]}"
+    if [ "${LE_OK:-0}" -eq 1 ] && [ -f "/etc/letsencrypt/live/$CERT_DOM/fullchain.pem" ]; then
         chmod -R 755 /etc/letsencrypt/archive /etc/letsencrypt/live
-        cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" \
-            "/etc/letsencrypt/live/$DOMAIN/privkey.pem" > "$STUNNEL_CERT"
-        success "Let's Encrypt certificate obtained for $DOMAIN"
+        cat "/etc/letsencrypt/live/$CERT_DOM/fullchain.pem" \
+            "/etc/letsencrypt/live/$CERT_DOM/privkey.pem" > "$STUNNEL_CERT"
+        success "Let's Encrypt certificate covers: ${ALL_DOMAINS[*]}"
     else
-        warn "Let's Encrypt failed — using self-signed certificate"
+        warn "Let's Encrypt failed for one or more domains — using self-signed certificate"
+        warn "(make sure every domain points to ${SERVER_IP} before installing)"
         DOMAIN=""
     fi
 fi
@@ -1446,7 +1497,12 @@ echo -e "${BGreen}============================================================${
 echo -e "${BPurple}      INSTALLATION COMPLETE — ALL PROTOCOLS INSTALLED       ${NC}"
 echo -e "${BGreen}============================================================${NC}"
 echo ""
-echo -e "  Host / Domain : ${BYellow}${DOMAIN:-$SERVER_IP}${NC}"
+if [ "${#ALL_DOMAINS[@]}" -gt 0 ]; then
+    echo -e "  Domains       : ${BYellow}${ALL_DOMAINS[*]}${NC}"
+else
+    echo -e "  Host / Domain : ${BYellow}${SERVER_IP}${NC}"
+fi
+echo -e "  Server IP     : ${BYellow}${SERVER_IP}${NC}"
 echo ""
 echo -e "  ${BCyan}Installed services & ports:${NC}"
 echo -e "    WebSocket (payload)  → 80"
