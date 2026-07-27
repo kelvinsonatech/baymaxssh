@@ -1071,13 +1071,16 @@ VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_T
 TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
 # Port-443 handover flag (when set, V2Ray owns 443 and SSL payload is off)
 XP443F=/etc/xray/port443
+# V2Ray domain chosen at enable time (persists across reboots)
+XDOMAINF=/etc/xray/domain
 STCONF=/etc/stunnel/stunnel.conf
 STCERT=/etc/stunnel/stunnel.pem
 
 xray_paths() {
     mkdir -p /etc/xray /usr/local/etc/xray
     touch "$XACC"
-    XDOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+    XDOMAIN=$(cat "$XDOMAINF" 2>/dev/null)
+    [ -z "$XDOMAIN" ] && XDOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
     XIP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
     XHOST="${XDOMAIN:-$XIP}"
     XADDR="$XHOST"
@@ -1410,13 +1413,33 @@ xray_delete() {
 
 _v2ray_up() { rebuild_config; systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; }
 
+# True if V2Ray has been enabled before (persists across reboots).
+v2ray_enabled() {
+    [ -f /usr/local/bin/xray ] || return 1
+    systemctl is-enabled --quiet xray 2>/dev/null || systemctl is-active --quiet xray 2>/dev/null
+}
+
 enable_v2ray() {
     xray_paths
+    # Already enabled -> go straight to the management menu.
+    if v2ray_enabled; then xray_menu; return; fi
+
     section "ENABLE V2RAY" "$PINK"
-    if systemctl is-active --quiet xray 2>/dev/null; then
-        ok "V2Ray is already ${G}ACTIVE${NC}."
-        sleep 1; xray_menu; return
+    row "$PINK" "${GR}Enter a domain for V2Ray TLS/SNI, or leave blank to use the server IP.${NC}"
+    echo ""
+    read -rp "$(echo -e "  ${C}Domain${NC} ${GR}(blank = ${XIP})${NC} : ")" VD
+    VD=$(echo "$VD" | tr -d ' ')
+    mkdir -p /etc/xray
+    if [ -n "$VD" ]; then
+        echo "$VD" > "$XDOMAINF"
+        ok "Using domain '${W}${VD}${NC}' for V2Ray."
+    else
+        rm -f "$XDOMAINF"
+        note "No domain — V2Ray will use the server IP (${XIP})."
     fi
+    xray_paths   # reload XHOST/XADDR with the chosen domain
+    echo ""
+
     if [ ! -f "$XBIN" ]; then
         spin "Installing V2Ray-core (needs internet)..." xray_install || { err "Install failed — check the server's internet."; pause; return; }
     fi
@@ -1485,7 +1508,7 @@ while true; do
     menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
     menu_item "7" "📊" "Service status"           "$C"
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
-    menu_item "9" "🌐" "Enable V2Ray"             "$PINK"
+    if v2ray_enabled; then menu_item "9" "🌐" "V2Ray  ${G}● active${NC}"     "$PINK"; else menu_item "9" "🌐" "Enable V2Ray"             "$PINK"; fi
     menu_item "10" "🔄" "Restart all services"    "$Y"
     menu_item "11" "🔐" "Change server password"  "$R"
     menu_item "0" "🚪" "Exit"                     "$GR"
