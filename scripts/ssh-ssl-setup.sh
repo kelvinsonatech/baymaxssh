@@ -26,11 +26,36 @@ set -e
 
 BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
 BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
+BOLD='\033[1m'; DIM='\033[2m'; GRY='\033[0;90m'
+TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINKC='\033[38;5;213m'
+LIMEC='\033[38;5;190m'; ORNG='\033[38;5;208m'; BWHITE='\033[1;37m'
 
-info()    { echo -e "${BCyan}[*] $*${NC}"; }
-success() { echo -e "${BGreen}[✓] $*${NC}"; }
-warn()    { echo -e "${BYellow}[!] $*${NC}"; }
-error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
+info()    { echo -e "     ${SKY}◆${NC} ${DIM}$*${NC}"; }
+success() { echo -e "     ${BGreen}✔${NC} $*"; }
+warn()    { echo -e "     ${BYellow}▲${NC} $*"; }
+error()   { echo -e "     ${BRed}✘ $*${NC}"; exit 1; }
+
+# ── advanced installer progress system ──────────────────
+INSTALL_STEP=0
+INSTALL_TOTAL=10
+_term_w() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 74 ] && c=74; [ "$c" -lt 40 ] && c=40; echo "$c"; }
+
+# phase "Title" — prints a numbered header with a live progress bar.
+phase() {
+    INSTALL_STEP=$((INSTALL_STEP + 1))
+    local title="$1" w pct barw filled empty i
+    w=$(_term_w)
+    pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
+    barw=$(( w - 14 )); [ "$barw" -lt 10 ] && barw=10
+    filled=$(( barw * INSTALL_STEP / INSTALL_TOTAL )); empty=$(( barw - filled ))
+    echo ""
+    printf "   ${TEAL}${BOLD}▎%02d/%02d${NC}  ${BWHITE}${BOLD}%s${NC}\n" "$INSTALL_STEP" "$INSTALL_TOTAL" "$title"
+    printf "   ${TEAL}"
+    for ((i=0; i<filled; i++)); do printf "━"; done
+    printf "${GRY}"
+    for ((i=0; i<empty; i++)); do printf "─"; done
+    printf "${NC}  ${TEAL}${BOLD}%3d%%${NC}\n" "$pct"
+}
 
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
 
@@ -58,13 +83,21 @@ apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 
 echo ""
-_bx_top
-_bx_row "SSH + WEBSOCKET + SSL VPN INSTALLER"
-_bx_mid
-_bx_row "Server IP: ${SERVER_IP}"
-_bx_row "SSL: self-signed (no domain needed)"
-_bx_bot
+echo -e "   ${TEAL}${BOLD}███████╗███████╗██╗  ██╗   ${SKY}██╗   ██╗██████╗ ███╗   ██╗${NC}"
+echo -e "   ${TEAL}${BOLD}██╔════╝██╔════╝██║  ██║   ${SKY}██║   ██║██╔══██╗████╗  ██║${NC}"
+echo -e "   ${TEAL}${BOLD}███████╗███████╗███████║   ${SKY}██║   ██║██████╔╝██╔██╗ ██║${NC}"
+echo -e "   ${TEAL}${BOLD}╚════██║╚════██║██╔══██║   ${SKY}╚██╗ ██╔╝██╔═══╝ ██║╚██╗██║${NC}"
+echo -e "   ${TEAL}${BOLD}███████║███████║██║  ██║    ${SKY}╚████╔╝ ██║     ██║ ╚████║${NC}"
+echo -e "   ${TEAL}${BOLD}╚══════╝╚══════╝╚═╝  ╚═╝     ${SKY}╚═══╝  ╚═╝     ╚═╝  ╚═══╝${NC}"
+echo -e "        ${GRY}ws · ssl · openssh · v2ray  —  server installer${NC}"
 echo ""
+echo -e "   ${GRY}┌───────────────────────────────────────────────────┐${NC}"
+echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} Server IP  ${BWHITE}${BOLD}${SERVER_IP}${NC}"
+echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} SSL mode   ${BWHITE}self-signed${NC} ${GRY}(no domain needed)${NC}"
+echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} Steps      ${BWHITE}${INSTALL_TOTAL}${NC} ${GRY}phases${NC}"
+echo -e "   ${GRY}└───────────────────────────────────────────────────┘${NC}"
+echo ""
+sleep 1
 
 # No domain — always use a self-signed certificate. Connect using the IP.
 DOMAINS=()
@@ -89,18 +122,15 @@ APT="apt-get install -y \
     -o Dpkg::Options::='--force-confdef' \
     -o Dpkg::Options::='--force-confold'"
 
+phase "Preparing system & package sources"
 info "Updating package list..."
 apt-get update -y </dev/null >/dev/null 2>&1
-
-echo ""
-echo -e "${BGreen}============================================${NC}"
-echo -e "${BCyan}     INSTALLING VPN PROTOCOLS                ${NC}"
-echo -e "${BGreen}============================================${NC}"
-echo ""
+success "System ready"
 
 # ═══════════════════════════════════════════
 # SECTION 1 — OPENSSH
 # ═══════════════════════════════════════════
+phase "Installing & configuring OpenSSH"
 info "Installing & configuring OpenSSH..."
 eval "$APT openssh-server curl" </dev/null >/dev/null 2>&1
 
@@ -148,6 +178,7 @@ success "OpenSSH now serves direct ports 22, 109 and 143"
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
 # ═══════════════════════════════════════════
+phase "Building WebSocket / SSH proxy (port 80)"
 info "Building high-performance Go WebSocket/SSH proxy (port 80)..."
 
 # Remove any leftover Python proxy from a previous install.
@@ -388,6 +419,7 @@ success "WebSocket/SSH proxy installed (port 80)"
 # ═══════════════════════════════════════════
 # SECTION 4 — SSL CERTIFICATE
 # ═══════════════════════════════════════════
+phase "Generating SSL certificate"
 info "Setting up SSL certificate..."
 eval "$APT stunnel4 openssl" </dev/null >/dev/null 2>&1
 mkdir -p /etc/stunnel
@@ -419,6 +451,7 @@ systemctl start ws-proxy >/dev/null 2>&1 || true
 #   443 -> WebSocket proxy (SSL + payload)
 #   447 -> OpenSSH direct  (plain SSL)
 # ═══════════════════════════════════════════
+phase "Configuring Stunnel (SSL/TLS on 443 & 447)"
 info "Configuring Stunnel (SSL on 443 & 447)..."
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || true
 
@@ -449,6 +482,7 @@ success "Stunnel running — SSL 443 (payload) & 447 (direct SSH)"
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
 # ═══════════════════════════════════════════
+phase "Configuring firewall"
 info "Opening firewall ports..."
 if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
@@ -462,6 +496,7 @@ fi
 # ═══════════════════════════════════════════
 # SECTION 6b — BANDWIDTH MONITOR (vnstat)
 # ═══════════════════════════════════════════
+phase "Installing bandwidth monitor"
 info "Installing bandwidth monitor (vnstat)..."
 eval "$APT vnstat" </dev/null >/dev/null 2>&1 || true
 # Detect the primary network interface and register it with vnstat.
@@ -479,6 +514,7 @@ success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
 #   These are installed but Xray itself stays OFF until activated in the menu.
 # ═══════════════════════════════════════════
+phase "Installing V2Ray helper scripts"
 info "Installing Xray helper scripts (config generator + limit checker)..."
 
 # --- config generator: rebuilds Xray config from the accounts file --------
@@ -639,6 +675,7 @@ success "Xray helper scripts installed (quota + expiry enforcement ready)"
 # ═══════════════════════════════════════════
 # SECTION 7 — INSTALL THE 'menu' COMMAND
 # ═══════════════════════════════════════════
+phase "Installing management panel"
 info "Installing management panel (menu command)..."
 
 cat > /usr/local/bin/menu <<'MENUEOF'
@@ -1462,6 +1499,7 @@ success "Management panel installed — type 'menu' to open it"
 # ═══════════════════════════════════════════
 # DEFAULT SSH USERS (auto-created)
 # ═══════════════════════════════════════════
+phase "Creating default SSH users"
 info "Creating default SSH users..."
 DEFAULT_USER_PASS="0000"
 DEFAULT_USER_DAYS=30
@@ -1480,33 +1518,34 @@ done
 # FINAL MESSAGE
 # ═══════════════════════════════════════════
 clear
-echo -e "${BGreen}============================================================${NC}"
-echo -e "${BPurple}      INSTALLATION COMPLETE — ALL PROTOCOLS INSTALLED       ${NC}"
-echo -e "${BGreen}============================================================${NC}"
 echo ""
+echo -e "   ${BGreen}${BOLD}  ✔  INSTALLATION COMPLETE${NC}"
+echo -e "   ${GRY}All protocols installed and running — server is ready.${NC}"
+echo ""
+echo -e "   ${TEAL}"
+for ((i=0; i<52; i++)); do printf "━"; done
+echo -e "${NC}"
+echo -e "   ${SKY}◆${NC} Server IP  ${BWHITE}${BOLD}${SERVER_IP}${NC}"
 if [ "${#ALL_DOMAINS[@]}" -gt 0 ]; then
-    echo -e "  Domains       : ${BYellow}${ALL_DOMAINS[*]}${NC}"
-else
-    echo -e "  Host / Domain : ${BYellow}${SERVER_IP}${NC}"
+    echo -e "   ${SKY}◆${NC} Domains    ${BWHITE}${ALL_DOMAINS[*]}${NC}"
 fi
-echo -e "  Server IP     : ${BYellow}${SERVER_IP}${NC}"
 echo ""
-echo -e "  ${BCyan}Installed services & ports:${NC}"
-echo -e "    WebSocket (payload)  → 80"
-echo -e "    SSL + payload (TLS)  → 443"
-echo -e "    SSL direct SSH (TLS) → 447"
-echo -e "    OpenSSH              → 22, 109, 143"
+echo -e "   ${BWHITE}${BOLD}CONNECTION PORTS${NC}"
+echo -e "     ${LIMEC}▸${NC} WebSocket (payload)   ${GRY}→${NC} ${BWHITE}80${NC}"
+echo -e "     ${LIMEC}▸${NC} SSL + payload (TLS)   ${GRY}→${NC} ${BWHITE}443${NC}"
+echo -e "     ${LIMEC}▸${NC} SSL direct SSH (TLS)  ${GRY}→${NC} ${BWHITE}447${NC}"
+echo -e "     ${LIMEC}▸${NC} OpenSSH               ${GRY}→${NC} ${BWHITE}22, 109, 143${NC}"
 echo ""
-echo -e "  ${BCyan}Default SSH users (pass: 0000, valid ${DEFAULT_USER_DAYS} days):${NC}"
-echo -e "    boew · caen · xeon · haje · pein"
+echo -e "   ${BWHITE}${BOLD}DEFAULT USERS${NC} ${GRY}(pass: 0000 · valid ${DEFAULT_USER_DAYS} days)${NC}"
+echo -e "     ${PINKC}boew${NC} · ${PINKC}caen${NC} · ${PINKC}xeon${NC} · ${PINKC}haje${NC} · ${PINKC}pein${NC}"
 echo ""
-echo -e "  ${BCyan}Client tips:${NC}"
-echo -e "    WebSocket payload : GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
-echo -e "    SSL/SNI host      : ${DOMAIN:-$SERVER_IP}"
-echo ""
-echo -e "${BGreen}============================================================${NC}"
-echo -e "${BYellow}   Type ${BGreen}menu${BYellow} to open the panel and create users.${NC}"
-echo -e "${BGreen}============================================================${NC}"
+echo -e "   ${BWHITE}${BOLD}CLIENT TIPS${NC}"
+echo -e "     ${GRY}Payload :${NC} GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
+echo -e "     ${GRY}SNI host:${NC} ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
+echo -e "   ${TEAL}"
+for ((i=0; i<52; i++)); do printf "━"; done
+echo -e "${NC}"
+echo -e "   ${BYellow}➜  Type ${BGreen}${BOLD}menu${NC}${BYellow} to open the control panel.${NC}"
 echo ""
 
 # ═══════════════════════════════════════════
