@@ -30,31 +30,47 @@ BOLD='\033[1m'; DIM='\033[2m'; GRY='\033[0;90m'
 TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINKC='\033[38;5;213m'
 LIMEC='\033[38;5;190m'; ORNG='\033[38;5;208m'; BWHITE='\033[1;37m'
 
-info()    { echo -e "     ${SKY}◆${NC} ${DIM}$*${NC}"; }
-success() { echo -e "     ${BGreen}✔${NC} $*"; }
-warn()    { echo -e "     ${BYellow}▲${NC} $*"; }
-error()   { echo -e "     ${BRed}✘ $*${NC}"; exit 1; }
+# During the phased install, detail lines stay silent so the single
+# progress bar animates cleanly on one line. Warnings/errors still show.
+info()    { :; }
+success() { :; }
+warn()    { printf "\r\033[K"; echo -e "     ${BYellow}▲${NC} $*"; }
+error()   { printf "\r\033[K"; echo -e "     ${BRed}✘ $*${NC}"; exit 1; }
 
-# ── advanced installer progress system ──────────────────
+# ── advanced installer progress system (single animated bar) ──
 INSTALL_STEP=0
 INSTALL_TOTAL=10
+PROG_PCT=0
+_spin_frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 _term_w() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 74 ] && c=74; [ "$c" -lt 40 ] && c=40; echo "$c"; }
 
-# phase "Title" — prints a numbered header with a live progress bar.
-phase() {
-    INSTALL_STEP=$((INSTALL_STEP + 1))
-    local title="$1" w pct barw filled empty i
+# _draw_progress <pct> <frame> <label> — redraws ONE line in place.
+_draw_progress() {
+    local pct="$1" frame="$2" label="$3" w barw filled empty i lbl
     w=$(_term_w)
-    pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
-    barw=$(( w - 14 )); [ "$barw" -lt 10 ] && barw=10
-    filled=$(( barw * INSTALL_STEP / INSTALL_TOTAL )); empty=$(( barw - filled ))
-    echo ""
-    printf "   ${TEAL}${BOLD}▎%02d/%02d${NC}  ${BWHITE}${BOLD}%s${NC}\n" "$INSTALL_STEP" "$INSTALL_TOTAL" "$title"
-    printf "   ${TEAL}"
+    printf -v lbl "%-24.24s" "$label"
+    barw=$(( w - 40 )); [ "$barw" -lt 10 ] && barw=10
+    filled=$(( barw * pct / 100 )); empty=$(( barw - filled ))
+    printf "\r\033[K   ${TEAL}%s${NC} ${BWHITE}%s${NC} ${TEAL}" "$frame" "$lbl"
     for ((i=0; i<filled; i++)); do printf "━"; done
     printf "${GRY}"
     for ((i=0; i<empty; i++)); do printf "─"; done
-    printf "${NC}  ${TEAL}${BOLD}%3d%%${NC}\n" "$pct"
+    printf "${NC} ${TEAL}${BOLD}%3d%%${NC}" "$pct"
+}
+
+# phase "Title" — animates the single bar up to this step's target %.
+phase() {
+    INSTALL_STEP=$((INSTALL_STEP + 1))
+    local title="$1" target fi=0
+    target=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
+    while [ "$PROG_PCT" -lt "$target" ]; do
+        PROG_PCT=$((PROG_PCT + 1))
+        fi=$(( (fi + 1) % ${#_spin_frames} ))
+        _draw_progress "$PROG_PCT" "${_spin_frames:$fi:1}" "$title"
+        sleep 0.015
+    done
+    _draw_progress "$PROG_PCT" "✔" "$title"
+    if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
 }
 
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
