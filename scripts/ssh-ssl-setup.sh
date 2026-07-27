@@ -803,6 +803,23 @@ err()  { echo -e "  ${R}✘${NC} $*"; }
 note() { echo -e "  ${Y}➜${NC} $*"; }
 warn() { echo -e "  ${Y}⚠${NC} $*"; }
 
+# spin "message" command args...  — runs command while showing a loading animation.
+spin() {
+    local msg="$1"; shift
+    ( "$@" ) >/dev/null 2>&1 &
+    local pid=$! i=0 frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % ${#frames} ))
+        printf "\r  ${C}%s${NC} %s" "${frames:$i:1}" "$msg"
+        sleep 0.1
+    done
+    wait "$pid"; local rc=$?
+    command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
+    printf "\r\033[K"
+    return $rc
+}
+
 create_user() {
     section "CREATE SSH USER" "$LIME"
     read -rp "$(echo -e "  ${C}Username${NC}   : ")" USERNAME
@@ -1338,6 +1355,29 @@ xray_delete() {
     pause
 }
 
+_v2ray_up() { rebuild_config; systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; }
+
+enable_v2ray() {
+    xray_paths
+    section "ENABLE V2RAY" "$PINK"
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        ok "V2Ray is already ${G}ACTIVE${NC}."
+        sleep 1; xray_menu; return
+    fi
+    if [ ! -f "$XBIN" ]; then
+        spin "Installing V2Ray-core (needs internet)..." xray_install || { err "Install failed — check the server's internet."; pause; return; }
+    fi
+    spin "Enabling & starting V2Ray..." _v2ray_up
+    sleep 1
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        ok "V2Ray is now ${G}ACTIVE${NC}."
+    else
+        note "V2Ray installed & enabled — create an account to finish setup."
+    fi
+    sleep 1
+    xray_menu
+}
+
 xray_menu() {
     xray_paths
     while true; do
@@ -1392,7 +1432,7 @@ while true; do
     menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
     menu_item "7" "📊" "Service status"           "$C"
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
-    menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
+    menu_item "9" "🌐" "Enable V2Ray"             "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
     menu_item "11" "🔐" "Change server password"  "$R"
     menu_item "0" "🚪" "Exit"                     "$GR"
@@ -1407,7 +1447,7 @@ while true; do
         6) renew_user ;;
         7) service_status ;;
         8) bandwidth ;;
-        9) xray_menu ;;
+        9) enable_v2ray ;;
         10) restart_services ;;
         11) change_root_password ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
