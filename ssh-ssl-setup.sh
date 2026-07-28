@@ -8,8 +8,8 @@
 #   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (SSL payload)
 #   447  — SSL/TLS  (stunnel) -> OpenSSH direct
 #   22   — OpenSSH  (management / direct)
-#   109  — OpenSSH  (direct)
-#   143  — OpenSSH  (direct alt)
+#   109  — Dropbear (direct)
+#   143  — Dropbear (direct alt)
 #
 # The port-80 proxy is DUAL MODE:
 #   * If the client sends an HTTP/WebSocket payload, it replies
@@ -26,62 +26,11 @@ set -e
 
 BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
 BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
-BOLD='\033[1m'; DIM='\033[2m'; GRY='\033[0;90m'
-TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINKC='\033[38;5;213m'
-LIMEC='\033[38;5;190m'; ORNG='\033[38;5;208m'; BWHITE='\033[1;37m'
 
-# During the phased install, detail lines stay silent so the single
-# progress bar animates cleanly on one line. Warnings/errors still show.
-info()    { :; }
-success() { :; }
-warn()    { printf "\r\033[K"; echo -e "     ${BYellow}▲${NC} $*"; }
-error()   { printf "\r\033[K"; echo -e "     ${BRed}✘ $*${NC}"; exit 1; }
-
-# ── advanced installer progress system (single animated bar) ──
-INSTALL_STEP=0
-INSTALL_TOTAL=10
-PROG_PCT=0
-INSTALL_T0=$SECONDS
-_spin_frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-_term_w() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 74 ] && c=74; [ "$c" -lt 40 ] && c=40; echo "$c"; }
-
-# _draw_progress <pct> <frame> <label> — redraws ONE line in place.
-# Advanced HUD: [step/total] spinner label gradient-bar pct elapsed
-_draw_progress() {
-    local pct="$1" frame="$2" label="$3" w barw filled empty i lbl el
-    w=$(_term_w)
-    printf -v lbl "%-18.18s" "$label"
-    el=$(( SECONDS - INSTALL_T0 ))
-    barw=$(( w - 42 )); [ "$barw" -lt 10 ] && barw=10
-    filled=$(( barw * pct / 100 )); empty=$(( barw - filled ))
-    printf "\r\033[K ${GRY}[${NC}${BWHITE}%2d${NC}${GRY}/%d]${NC} ${TEAL}%s${NC} ${BWHITE}%s${NC} " \
-        "$INSTALL_STEP" "$INSTALL_TOTAL" "$frame" "$lbl"
-    # gradient fill: teal -> sky -> white hot tip
-    for ((i=0; i<filled; i++)); do
-        if   (( i * 3 <  barw     )); then printf "${TEAL}━"
-        elif (( i * 3 <  barw * 2 )); then printf "${SKY}━"
-        else printf "${BWHITE}━"; fi
-    done
-    printf "${GRY}"
-    for ((i=0; i<empty; i++)); do printf "─"; done
-    printf "${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" "$pct" "$el"
-}
-
-# phase "Title" — fast-animates the single bar up to this step's target %.
-phase() {
-    INSTALL_STEP=$((INSTALL_STEP + 1))
-    local title="$1" target fi=0
-    target=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
-    while [ "$PROG_PCT" -lt "$target" ]; do
-        PROG_PCT=$((PROG_PCT + 2))
-        if [ "$PROG_PCT" -gt "$target" ]; then PROG_PCT=$target; fi
-        fi=$(( (fi + 1) % ${#_spin_frames} ))
-        _draw_progress "$PROG_PCT" "${_spin_frames:$fi:1}" "$title"
-        sleep 0.008
-    done
-    _draw_progress "$PROG_PCT" "✔" "$title"
-    if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
-}
+info()    { echo -e "${BCyan}[*] $*${NC}"; }
+success() { echo -e "${BGreen}[✓] $*${NC}"; }
+warn()    { echo -e "${BYellow}[!] $*${NC}"; }
+error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
 
@@ -93,44 +42,26 @@ STUNNEL_CERT=/etc/stunnel/stunnel.pem
 # ASK FOR DOMAIN
 # ═══════════════════════════════════════════
 clear
-# ── framed header ──────────────────────────────────────
-BOX_W=58
-_bx_top()  { printf "${BCyan}╭%s╮${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
-_bx_bot()  { printf "${BCyan}╰%s╯${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
-_bx_mid()  { printf "${BCyan}├%s┤${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
-_bx_row()  {  # centered plain text (no ansi inside)
-    local t="$1" len l r; len=${#t}
-    l=$(( (BOX_W - len) / 2 )); r=$(( BOX_W - len - l ))
-    (( l < 0 )) && l=0; (( r < 0 )) && r=0
-    printf "${BCyan}│${NC}%*s${BYellow}%s${NC}%*s${BCyan}│${NC}\n" "$l" "" "$t" "$r" ""
-}
+echo -e "${BGreen}============================================${NC}"
+echo -e "${BCyan}    SSH + WEBSOCKET + SSL VPN INSTALLER      ${NC}"
+echo -e "${BGreen}============================================${NC}"
+echo ""
+echo -e "${BYellow}Enter your domain name (pointed at this server's IP).${NC}"
+echo -e "${BYellow}Leave blank to use a self-signed certificate.${NC}"
+echo ""
+read -rp "  Domain: " DOMAIN
+DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
 
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-
-echo ""
-echo -e "   ${TEAL}${BOLD}███████╗███████╗██╗  ██╗   ${SKY}██╗   ██╗██████╗ ███╗   ██╗${NC}"
-echo -e "   ${TEAL}${BOLD}██╔════╝██╔════╝██║  ██║   ${SKY}██║   ██║██╔══██╗████╗  ██║${NC}"
-echo -e "   ${TEAL}${BOLD}███████╗███████╗███████║   ${SKY}██║   ██║██████╔╝██╔██╗ ██║${NC}"
-echo -e "   ${TEAL}${BOLD}╚════██║╚════██║██╔══██║   ${SKY}╚██╗ ██╔╝██╔═══╝ ██║╚██╗██║${NC}"
-echo -e "   ${TEAL}${BOLD}███████║███████║██║  ██║    ${SKY}╚████╔╝ ██║     ██║ ╚████║${NC}"
-echo -e "   ${TEAL}${BOLD}╚══════╝╚══════╝╚═╝  ╚═╝     ${SKY}╚═══╝  ╚═╝     ╚═╝  ╚═══╝${NC}"
-echo -e "        ${GRY}ws · ssl · openssh · v2ray  —  server installer${NC}"
-echo ""
-echo -e "   ${GRY}┌───────────────────────────────────────────────────┐${NC}"
-echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} Server IP  ${BWHITE}${BOLD}${SERVER_IP}${NC}"
-echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} SSL mode   ${BWHITE}self-signed${NC} ${GRY}(no domain needed)${NC}"
-echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} Steps      ${BWHITE}${INSTALL_TOTAL}${NC} ${GRY}phases${NC}"
-echo -e "   ${GRY}└───────────────────────────────────────────────────┘${NC}"
-echo ""
-sleep 0.4
-
-# No domain — always use a self-signed certificate. Connect using the IP.
-DOMAINS=()
-DOMAIN=""
-: > "$CONF_DIR/domains.conf"
-echo ""          > "$CONF_DIR/domain.conf"
+echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
+
+if [ -n "$DOMAIN" ]; then
+    echo -e "\n${BGreen}Using domain:${NC} $DOMAIN"
+else
+    echo -e "\n${BYellow}No domain — a self-signed certificate will be used.${NC}"
+fi
 sleep 1
 
 # ─── Package manager setup ───────────────────────────────────
@@ -148,15 +79,18 @@ APT="apt-get install -y \
     -o Dpkg::Options::='--force-confdef' \
     -o Dpkg::Options::='--force-confold'"
 
-phase "Preparing system & package sources"
 info "Updating package list..."
 apt-get update -y </dev/null >/dev/null 2>&1
-success "System ready"
+
+echo ""
+echo -e "${BGreen}============================================${NC}"
+echo -e "${BCyan}     INSTALLING VPN PROTOCOLS                ${NC}"
+echo -e "${BGreen}============================================${NC}"
+echo ""
 
 # ═══════════════════════════════════════════
 # SECTION 1 — OPENSSH
 # ═══════════════════════════════════════════
-phase "Installing & configuring OpenSSH"
 info "Installing & configuring OpenSSH..."
 eval "$APT openssh-server curl" </dev/null >/dev/null 2>&1
 
@@ -173,10 +107,6 @@ apply_sshd_setting() {
 }
 
 apply_sshd_setting "Port"                    "22"
-# OpenSSH also listens on the former Dropbear direct ports so those endpoints keep working.
-for XP in 109 143; do
-    grep -qxF "Port ${XP}" "$SSHD_CONF" || echo "Port ${XP}" >> "$SSHD_CONF"
-done
 apply_sshd_setting "PermitRootLogin"         "yes"
 apply_sshd_setting "PasswordAuthentication"  "yes"
 apply_sshd_setting "AllowTcpForwarding"      "yes"
@@ -191,20 +121,36 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 success "OpenSSH configured on port 22"
 
 # ═══════════════════════════════════════════
-# SECTION 2 — TUNNEL-ONLY SHELLS
+# SECTION 2 — DROPBEAR (direct SSH targets)
 # ═══════════════════════════════════════════
-# OpenSSH accepts tunnel-only accounts whose shell is /bin/false.
+info "Installing Dropbear (ports 109 & 143)..."
+eval "$APT dropbear" </dev/null >/dev/null 2>&1
+
+mkdir -p /etc/dropbear
+for TYPE in dss rsa ecdsa ed25519; do
+    KEYFILE="/etc/dropbear/dropbear_${TYPE}_host_key"
+    [ -f "$KEYFILE" ] || dropbearkey -t "$TYPE" -f "$KEYFILE" >/dev/null 2>&1 || true
+done
+
+# Dropbear (and OpenSSH) accept tunnel-only accounts whose shell is /bin/false.
 grep -qxF '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells
 grep -qxF '/usr/sbin/nologin' /etc/shells || echo '/usr/sbin/nologin' >> /etc/shells
 
-# Remove Dropbear if a previous install left it behind — OpenSSH now serves all ports.
-systemctl disable --now dropbear >/dev/null 2>&1 || true
-success "OpenSSH now serves direct ports 22, 109 and 143"
+cat > /etc/default/dropbear <<'EOF'
+NO_START=0
+DROPBEAR_PORT=109
+DROPBEAR_EXTRA_ARGS="-p 143 -I 300 -K 30"
+DROPBEAR_BANNER=""
+DROPBEAR_RECEIVE_WINDOW=65536
+EOF
+
+systemctl enable dropbear >/dev/null 2>&1 || true
+systemctl restart dropbear
+success "Dropbear running on ports 109 and 143"
 
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
 # ═══════════════════════════════════════════
-phase "Building WebSocket / SSH proxy (port 80)"
 info "Building high-performance Go WebSocket/SSH proxy (port 80)..."
 
 # Remove any leftover Python proxy from a previous install.
@@ -231,7 +177,7 @@ cat > "$BUILD_DIR/main.go" <<'GOEOF'
 //   * If nothing arrives quickly, it assumes a direct SSH client waiting
 //     for the banner and tunnels straight through.
 //
-// Backend SSH = OpenSSH on 127.0.0.1:22.
+// Backend SSH = Dropbear on 127.0.0.1:109.
 package main
 
 import (
@@ -244,7 +190,7 @@ import (
 
 const (
 	listenAddr  = "0.0.0.0:80"
-	backendAddr = "127.0.0.1:22"
+	backendAddr = "127.0.0.1:109"
 	peekTimeout = 3 * time.Second
 )
 
@@ -352,7 +298,7 @@ else
     cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
 import socket, threading
-BACKEND=('127.0.0.1',22); LISTEN=('0.0.0.0',80); T=3
+BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=3
 RESP=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 def pipe(s,d):
     try:
@@ -422,8 +368,8 @@ fi
 
 cat > /etc/systemd/system/ws-proxy.service <<EOF
 [Unit]
-Description=Dual-mode WebSocket/SSH proxy (port 80 -> OpenSSH 22)
-After=network.target ssh.service
+Description=Dual-mode WebSocket/SSH proxy (port 80 -> Dropbear 109)
+After=network.target dropbear.service
 
 [Service]
 Type=simple
@@ -445,7 +391,6 @@ success "WebSocket/SSH proxy installed (port 80)"
 # ═══════════════════════════════════════════
 # SECTION 4 — SSL CERTIFICATE
 # ═══════════════════════════════════════════
-phase "Generating SSL certificate"
 info "Setting up SSL certificate..."
 eval "$APT stunnel4 openssl" </dev/null >/dev/null 2>&1
 mkdir -p /etc/stunnel
@@ -455,8 +400,23 @@ systemctl stop ws-proxy 2>/dev/null || true
 systemctl stop nginx 2>/dev/null || true
 systemctl stop apache2 2>/dev/null || true
 
-# Always use a self-signed certificate (no domain required).
-ALL_DOMAINS=()
+if [ -n "$DOMAIN" ]; then
+    info "Requesting Let's Encrypt certificate for $DOMAIN ..."
+    eval "$APT certbot" </dev/null >/dev/null 2>&1 || true
+    certbot certonly --standalone -d "$DOMAIN" \
+        --non-interactive --agree-tos \
+        --register-unsafely-without-email >/dev/null 2>&1 && LE_OK=1 || LE_OK=0
+
+    if [ "${LE_OK:-0}" -eq 1 ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+        chmod -R 755 /etc/letsencrypt/archive /etc/letsencrypt/live
+        cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" \
+            "/etc/letsencrypt/live/$DOMAIN/privkey.pem" > "$STUNNEL_CERT"
+        success "Let's Encrypt certificate obtained for $DOMAIN"
+    else
+        warn "Let's Encrypt failed — using self-signed certificate"
+        DOMAIN=""
+    fi
+fi
 
 if [ -z "$DOMAIN" ] || [ ! -f "$STUNNEL_CERT" ]; then
     warn "Generating self-signed certificate..."
@@ -477,7 +437,6 @@ systemctl start ws-proxy >/dev/null 2>&1 || true
 #   443 -> WebSocket proxy (SSL + payload)
 #   447 -> OpenSSH direct  (plain SSL)
 # ═══════════════════════════════════════════
-phase "Configuring Stunnel (SSL/TLS on 443 & 447)"
 info "Configuring Stunnel (SSL on 443 & 447)..."
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || true
 
@@ -508,7 +467,6 @@ success "Stunnel running — SSL 443 (payload) & 447 (direct SSH)"
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
 # ═══════════════════════════════════════════
-phase "Configuring firewall"
 info "Opening firewall ports..."
 if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
@@ -522,7 +480,6 @@ fi
 # ═══════════════════════════════════════════
 # SECTION 6b — BANDWIDTH MONITOR (vnstat)
 # ═══════════════════════════════════════════
-phase "Installing bandwidth monitor"
 info "Installing bandwidth monitor (vnstat)..."
 eval "$APT vnstat" </dev/null >/dev/null 2>&1 || true
 # Detect the primary network interface and register it with vnstat.
@@ -540,7 +497,6 @@ success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
 #   These are installed but Xray itself stays OFF until activated in the menu.
 # ═══════════════════════════════════════════
-phase "Installing V2Ray helper scripts"
 info "Installing Xray helper scripts (config generator + limit checker)..."
 
 # --- config generator: rebuilds Xray config from the accounts file --------
@@ -572,7 +528,6 @@ if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; the
 else
     [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
         -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
-    chmod 644 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
     CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
 fi
 
@@ -702,7 +657,6 @@ success "Xray helper scripts installed (quota + expiry enforcement ready)"
 # ═══════════════════════════════════════════
 # SECTION 7 — INSTALL THE 'menu' COMMAND
 # ═══════════════════════════════════════════
-phase "Installing management panel"
 info "Installing management panel (menu command)..."
 
 cat > /usr/local/bin/menu <<'MENUEOF'
@@ -821,7 +775,7 @@ banner() {
     echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
     echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
     echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
-    echo -e "        ${GR}ws · ssl · openssh manager${NC}"
+    echo -e "        ${GR}ws · ssl · dropbear · openssh manager${NC}"
     echo ""
 }
 
@@ -835,7 +789,7 @@ status_bar() {
     read -r _rx _tx _tot <<<"$(bw_alltime)"
     row "$col" "${GR}DATA${NC}    ${W}${BOLD}$(hb "$_tot")${NC} ${GR}used${NC}"
     local svcline="${GR}SVC${NC}    "
-    for s in ssh ws-proxy stunnel4; do
+    for s in ssh dropbear ws-proxy stunnel4; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
         svcline+="${dot} ${s}   "
     done
@@ -851,7 +805,8 @@ show_ports() {
     row "$col" "${LIME}▸${NC} WebSocket (payload)  ${GR}→${NC} ${W}${HOST_DISPLAY}:80${NC}"
     row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443${NC}"
     row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
-    row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22 / 109 / 143${NC}"
+    row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
+    row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
     line_bot "$col"
 }
 
@@ -866,23 +821,6 @@ ok()   { echo -e "  ${G}✔${NC} $*"; }
 err()  { echo -e "  ${R}✘${NC} $*"; }
 note() { echo -e "  ${Y}➜${NC} $*"; }
 warn() { echo -e "  ${Y}⚠${NC} $*"; }
-
-# spin "message" command args...  — runs command while showing a loading animation.
-spin() {
-    local msg="$1"; shift
-    ( "$@" ) >/dev/null 2>&1 &
-    local pid=$! i=0 frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null
-    while kill -0 "$pid" 2>/dev/null; do
-        i=$(( (i + 1) % ${#frames} ))
-        printf "\r  ${C}%s${NC} %s" "${frames:$i:1}" "$msg"
-        sleep 0.1
-    done
-    wait "$pid"; local rc=$?
-    command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
-    printf "\r\033[K"
-    return $rc
-}
 
 create_user() {
     section "CREATE SSH USER" "$LIME"
@@ -1010,22 +948,6 @@ change_password() {
     pause
 }
 
-change_root_password() {
-    section "CHANGE SERVER (ROOT) PASSWORD" "$R"
-    row "$R" "${Y}This changes the root/SSH login password for THIS server.${NC}"
-    echo ""
-    read -rp "$(echo -e "  ${C}New root password${NC} : ")" RPASS
-    [ -z "$RPASS" ] && { err "Password cannot be empty."; pause; return; }
-    read -rp "$(echo -e "  ${C}Confirm password${NC}  : ")" RPASS2
-    [ "$RPASS" != "$RPASS2" ] && { err "Passwords do not match."; pause; return; }
-    if echo -e "${RPASS}\n${RPASS}" | passwd root >/dev/null 2>&1; then
-        ok "Root password updated. Use it on your next SSH login."
-    else
-        err "Failed to change root password."
-    fi
-    pause
-}
-
 renew_user() {
     section "RENEW / EXTEND ACCOUNT" "$VIOLET"
     read -rp "$(echo -e "  ${C}Username${NC} : ")" USERNAME
@@ -1042,7 +964,7 @@ renew_user() {
 
 service_status() {
     section "SERVICE STATUS" "$P"
-    local col="$P" svcs="ssh ws-proxy stunnel4"
+    local col="$P" svcs="ssh dropbear ws-proxy stunnel4"
     [ -f /usr/local/bin/xray ] && svcs="$svcs xray"
     line_top "$col"
     for svc in $svcs; do
@@ -1061,6 +983,7 @@ restart_services() {
     section "RESTART ALL SERVICES" "$ORANGE"
     note "Restarting services, please wait..."
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+    systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
     systemctl restart stunnel4 2>/dev/null
     ok "All services restarted."
@@ -1082,16 +1005,13 @@ VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_T
 TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
 # Port-443 handover flag (when set, V2Ray owns 443 and SSL payload is off)
 XP443F=/etc/xray/port443
-# V2Ray domain chosen at enable time (persists across reboots)
-XDOMAINF=/etc/xray/domain
 STCONF=/etc/stunnel/stunnel.conf
 STCERT=/etc/stunnel/stunnel.pem
 
 xray_paths() {
     mkdir -p /etc/xray /usr/local/etc/xray
     touch "$XACC"
-    XDOMAIN=$(cat "$XDOMAINF" 2>/dev/null)
-    [ -z "$XDOMAIN" ] && XDOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+    XDOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
     XIP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
     XHOST="${XDOMAIN:-$XIP}"
     XADDR="$XHOST"
@@ -1101,7 +1021,6 @@ xray_paths() {
     else
         [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
             -subj "/CN=${XHOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
-        chmod 644 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
         XR_CERT=/etc/xray/xray.crt; XR_KEY=/etc/xray/xray.key
     fi
     # Mirror the 443 handover so displayed links use the right port.
@@ -1423,60 +1342,6 @@ xray_delete() {
     pause
 }
 
-_v2ray_up() { rebuild_config; systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; }
-
-# True if V2Ray has been enabled before (persists across reboots).
-v2ray_enabled() {
-    [ -f /usr/local/bin/xray ] || return 1
-    systemctl is-enabled --quiet xray 2>/dev/null || systemctl is-active --quiet xray 2>/dev/null
-}
-
-enable_v2ray() {
-    xray_paths
-    # Already enabled -> auto-repair if it's dead, then go to the management menu.
-    if v2ray_enabled; then
-        if ! systemctl is-active --quiet xray 2>/dev/null; then
-            spin "V2Ray stopped — rebuilding config & restarting..." _v2ray_up
-            sleep 1
-            if ! systemctl is-active --quiet xray 2>/dev/null; then
-                err "V2Ray failed to start. Last errors:"
-                journalctl -u xray -n 8 --no-pager 2>/dev/null | tail -4 | sed 's/^/    /'
-                pause
-            fi
-        fi
-        xray_menu; return
-    fi
-
-    section "ENABLE V2RAY" "$PINK"
-    row "$PINK" "${GR}Enter a domain for V2Ray TLS/SNI, or leave blank to use the server IP.${NC}"
-    echo ""
-    read -rp "$(echo -e "  ${C}Domain${NC} ${GR}(blank = ${XIP})${NC} : ")" VD
-    VD=$(echo "$VD" | tr -d ' ')
-    mkdir -p /etc/xray
-    if [ -n "$VD" ]; then
-        echo "$VD" > "$XDOMAINF"
-        ok "Using domain '${W}${VD}${NC}' for V2Ray."
-    else
-        rm -f "$XDOMAINF"
-        note "No domain — V2Ray will use the server IP (${XIP})."
-    fi
-    xray_paths   # reload XHOST/XADDR with the chosen domain
-    echo ""
-
-    if [ ! -f "$XBIN" ]; then
-        spin "Installing V2Ray-core (needs internet)..." xray_install || { err "Install failed — check the server's internet."; pause; return; }
-    fi
-    spin "Enabling & starting V2Ray..." _v2ray_up
-    sleep 1
-    if systemctl is-active --quiet xray 2>/dev/null; then
-        ok "V2Ray is now ${G}ACTIVE${NC}."
-    else
-        note "V2Ray installed & enabled — create an account to finish setup."
-    fi
-    sleep 1
-    xray_menu
-}
-
 xray_menu() {
     xray_paths
     while true; do
@@ -1506,7 +1371,7 @@ xray_menu() {
             1) xray_activate ;;
             2) xray_list ;;
             3) xray_delete ;;
-            4) spin "Rebuilding config & starting Xray..." _v2ray_up; if systemctl is-active --quiet xray 2>/dev/null; then ok "Xray started."; else err "Xray failed to start:"; journalctl -u xray -n 6 --no-pager 2>/dev/null | tail -3 | sed 's/^/    /'; fi; sleep 1 ;;
+            4) systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; ok "Xray started."; sleep 1 ;;
             5) systemctl stop xray >/dev/null 2>&1; ok "Xray stopped."; sleep 1 ;;
             6) xray_443 ;;
             0) break ;;
@@ -1531,9 +1396,8 @@ while true; do
     menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
     menu_item "7" "📊" "Service status"           "$C"
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
-    if v2ray_enabled; then menu_item "9" "🌐" "V2Ray  ${G}● active${NC}"     "$PINK"; else menu_item "9" "🌐" "Enable V2Ray"             "$PINK"; fi
+    menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
-    menu_item "11" "🔐" "Change server password"  "$R"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1546,9 +1410,8 @@ while true; do
         6) renew_user ;;
         7) service_status ;;
         8) bandwidth ;;
-        9) enable_v2ray ;;
+        9) xray_menu ;;
         10) restart_services ;;
-        11) change_root_password ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
@@ -1561,12 +1424,11 @@ success "Management panel installed — type 'menu' to open it"
 # ═══════════════════════════════════════════
 # DEFAULT SSH USERS (auto-created)
 # ═══════════════════════════════════════════
-phase "Creating default SSH users"
 info "Creating default SSH users..."
 DEFAULT_USER_PASS="0000"
 DEFAULT_USER_DAYS=30
 DEFAULT_USER_EXP=$(date -d "+${DEFAULT_USER_DAYS} days" +"%Y-%m-%d")
-for U in boew caen xeon haje pein; do
+for U in deon febo geto weon ceon; do
     if id "$U" >/dev/null 2>&1; then
         info "User '$U' already exists — skipped"
     else
@@ -1580,34 +1442,29 @@ done
 # FINAL MESSAGE
 # ═══════════════════════════════════════════
 clear
+echo -e "${BGreen}============================================================${NC}"
+echo -e "${BPurple}      INSTALLATION COMPLETE — ALL PROTOCOLS INSTALLED       ${NC}"
+echo -e "${BGreen}============================================================${NC}"
 echo ""
-echo -e "   ${BGreen}${BOLD}  ✔  INSTALLATION COMPLETE${NC}"
-echo -e "   ${GRY}All protocols installed and running — server is ready.${NC}"
+echo -e "  Host / Domain : ${BYellow}${DOMAIN:-$SERVER_IP}${NC}"
 echo ""
-echo -e "   ${TEAL}"
-for ((i=0; i<52; i++)); do printf "━"; done
-echo -e "${NC}"
-echo -e "   ${SKY}◆${NC} Server IP  ${BWHITE}${BOLD}${SERVER_IP}${NC}"
-if [ "${#ALL_DOMAINS[@]}" -gt 0 ]; then
-    echo -e "   ${SKY}◆${NC} Domains    ${BWHITE}${ALL_DOMAINS[*]}${NC}"
-fi
+echo -e "  ${BCyan}Installed services & ports:${NC}"
+echo -e "    WebSocket (payload)  → 80"
+echo -e "    SSL + payload (TLS)  → 443"
+echo -e "    SSL direct SSH (TLS) → 447"
+echo -e "    OpenSSH              → 22"
+echo -e "    Dropbear             → 109, 143"
 echo ""
-echo -e "   ${BWHITE}${BOLD}CONNECTION PORTS${NC}"
-echo -e "     ${LIMEC}▸${NC} WebSocket (payload)   ${GRY}→${NC} ${BWHITE}80${NC}"
-echo -e "     ${LIMEC}▸${NC} SSL + payload (TLS)   ${GRY}→${NC} ${BWHITE}443${NC}"
-echo -e "     ${LIMEC}▸${NC} SSL direct SSH (TLS)  ${GRY}→${NC} ${BWHITE}447${NC}"
-echo -e "     ${LIMEC}▸${NC} OpenSSH               ${GRY}→${NC} ${BWHITE}22, 109, 143${NC}"
+echo -e "  ${BCyan}Default SSH users (pass: 0000, valid ${DEFAULT_USER_DAYS} days):${NC}"
+echo -e "    deon · febo · geto · weon · ceon"
 echo ""
-echo -e "   ${BWHITE}${BOLD}DEFAULT USERS${NC} ${GRY}(pass: 0000 · valid ${DEFAULT_USER_DAYS} days)${NC}"
-echo -e "     ${PINKC}boew${NC} · ${PINKC}caen${NC} · ${PINKC}xeon${NC} · ${PINKC}haje${NC} · ${PINKC}pein${NC}"
+echo -e "  ${BCyan}Client tips:${NC}"
+echo -e "    WebSocket payload : GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
+echo -e "    SSL/SNI host      : ${DOMAIN:-$SERVER_IP}"
 echo ""
-echo -e "   ${BWHITE}${BOLD}CLIENT TIPS${NC}"
-echo -e "     ${GRY}Payload :${NC} GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
-echo -e "     ${GRY}SNI host:${NC} ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
-echo -e "   ${TEAL}"
-for ((i=0; i<52; i++)); do printf "━"; done
-echo -e "${NC}"
-echo -e "   ${BYellow}➜  Type ${BGreen}${BOLD}menu${NC}${BYellow} to open the control panel.${NC}"
+echo -e "${BGreen}============================================================${NC}"
+echo -e "${BYellow}   Type ${BGreen}menu${BYellow} to open the panel and create users.${NC}"
+echo -e "${BGreen}============================================================${NC}"
 echo ""
 
 # ═══════════════════════════════════════════
