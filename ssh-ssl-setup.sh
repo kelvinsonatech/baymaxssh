@@ -219,43 +219,65 @@ success "Dropbear running on ports 109 and 143"
 # SECTION 2b — SLOWDNS (DNSTT) over UDP 53
 # ═══════════════════════════════════════════
 phase "SlowDNS (DNSTT)"
+# NOTE: the whole SlowDNS phase runs with errexit OFF. A slow/failed apt, git
+# clone, or go build here must never abort the installer (that left the box with
+# no 'menu' command). Everything below is best-effort.
+set +e
 NS_DOMAIN=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
 if [ -n "$NS_DOMAIN" ]; then
-    systemctl stop slowdns >/dev/null 2>&1 || true
-    killall dnstt-server >/dev/null 2>&1 || true
+    systemctl stop slowdns >/dev/null 2>&1
+    killall dnstt-server >/dev/null 2>&1
 
     # --- Free UDP 53: systemd-resolved usually holds it and silently kills
     #     dnstt. Disable its stub listener but keep name resolution working.
     if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
         mkdir -p /etc/systemd/resolved.conf.d
         printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
-        rm -f /etc/resolv.conf 2>/dev/null || true
+        rm -f /etc/resolv.conf 2>/dev/null
         printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
-        systemctl restart systemd-resolved >/dev/null 2>&1 || true
+        systemctl restart systemd-resolved >/dev/null 2>&1
     fi
     # Anything else squatting on :53 (e.g. dnsmasq) — stop it.
-    fuser -k 53/udp >/dev/null 2>&1 || true
+    fuser -k 53/udp >/dev/null 2>&1
 
-    # --- Toolchain: prefer distro golang; fall back to snap. ---
-    eval "$APT git golang-go" </dev/null >/dev/null 2>&1
-    GO_BIN="$(command -v go || true)"
-    if [ -z "$GO_BIN" ]; then
-        eval "$APT snapd" </dev/null >/dev/null 2>&1
-        systemctl enable --now snapd.socket >/dev/null 2>&1 || true
-        [ -L /snap ] || ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true
-        sleep 2
-        snap install go --classic >/dev/null 2>&1 || true
-        GO_BIN=/snap/bin/go
+    # --- 1) Try a prebuilt dnstt-server binary first (fast, no compiler). ---
+    if [ ! -x /usr/local/bin/dnstt-server ]; then
+        for URL in \
+            "https://github.com/khaledagn/DNS-AGN/raw/main/files/dnstt-server" \
+            "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/files/dnstt-server"; do
+            curl -fsSL --connect-timeout 15 -o /usr/local/bin/dnstt-server "$URL" >/dev/null 2>&1
+            if [ -s /usr/local/bin/dnstt-server ]; then
+                chmod +x /usr/local/bin/dnstt-server
+                # Sanity-check it actually runs on this arch.
+                if /usr/local/bin/dnstt-server -help >/dev/null 2>&1 \
+                   || /usr/local/bin/dnstt-server 2>&1 | grep -qi 'usage\|dnstt\|privkey'; then
+                    break
+                fi
+                rm -f /usr/local/bin/dnstt-server
+            fi
+        done
     fi
 
-    # --- Build dnstt-server if we don't already have the binary. ---
-    if [ ! -x /usr/local/bin/dnstt-server ] && [ -x "$GO_BIN" ]; then
-        cd /root; rm -rf dnstt
-        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
-        if [ -d dnstt/dnstt-server ]; then
-            ( cd dnstt/dnstt-server && "$GO_BIN" build >/dev/null 2>&1 \
-              && mv -f dnstt-server /usr/local/bin/dnstt-server \
-              && chmod +x /usr/local/bin/dnstt-server )
+    # --- 2) Fallback: build from source if no working binary yet. ---
+    if [ ! -x /usr/local/bin/dnstt-server ]; then
+        eval "$APT git golang-go" </dev/null >/dev/null 2>&1
+        GO_BIN="$(command -v go || true)"
+        if [ -z "$GO_BIN" ]; then
+            eval "$APT snapd" </dev/null >/dev/null 2>&1
+            systemctl enable --now snapd.socket >/dev/null 2>&1
+            [ -L /snap ] || ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1
+            sleep 2
+            snap install go --classic >/dev/null 2>&1
+            GO_BIN=/snap/bin/go
+        fi
+        if [ -x "$GO_BIN" ]; then
+            cd /root; rm -rf dnstt
+            git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+            if [ -d dnstt/dnstt-server ]; then
+                ( cd dnstt/dnstt-server && "$GO_BIN" build >/dev/null 2>&1 \
+                  && mv -f dnstt-server /usr/local/bin/dnstt-server \
+                  && chmod +x /usr/local/bin/dnstt-server )
+            fi
         fi
     fi
 
@@ -292,11 +314,12 @@ EOF
             warn "SlowDNS installed but not active — check 'journalctl -u slowdns' (port 53 in use?)"
         fi
     else
-        warn "SlowDNS skipped — Go toolchain unavailable, could not build dnstt-server"
+        warn "SlowDNS skipped — could not obtain dnstt-server binary (install continues)"
     fi
 else
     info "SlowDNS skipped — no NS domain provided"
 fi
+set -e   # re-enable errexit for the rest of the installer
 
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
