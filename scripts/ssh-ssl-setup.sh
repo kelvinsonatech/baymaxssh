@@ -1012,6 +1012,52 @@ create_user() {
     pause
 }
 
+create_slowdns_user() {
+    section "CREATE SLOWDNS ACCOUNT" "$TEAL"
+    local ns pub
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat "$CONF_DIR/slowdns_pub.txt" 2>/dev/null)
+    if [ -z "$ns" ] || [ -z "$pub" ]; then
+        err "SlowDNS is not configured on this server."
+        note "Re-run the installer and enter an NS domain to enable it."
+        pause; return
+    fi
+    read -rp "$(echo -e "  ${C}Username${NC}   : ")" USERNAME
+    [ -z "$USERNAME" ] && { err "Username cannot be empty."; pause; return; }
+    if id "$USERNAME" >/dev/null 2>&1; then
+        err "User '${W}$USERNAME${NC}' already exists."; pause; return
+    fi
+    read -rp "$(echo -e "  ${C}Password${NC}   : ")" PASSWORD
+    [ -z "$PASSWORD" ] && { err "Password cannot be empty."; pause; return; }
+    read -rp "$(echo -e "  ${C}Days valid${NC} : ")" DAYS
+    [[ ! "$DAYS" =~ ^[0-9]+$ ]] && DAYS=30
+    EXP_DATE=$(date -d "+$DAYS days" +"%Y-%m-%d")
+
+    useradd -e "$EXP_DATE" -M -s /bin/false "$USERNAME"
+    echo -e "${PASSWORD}\n${PASSWORD}" | passwd "$USERNAME" >/dev/null 2>&1
+
+    banner
+    local col="$TEAL"
+    line_top "$col"; crow "$col" "${W}${BOLD}🐌 SLOWDNS ACCOUNT CREATED${NC}"; line_mid "$col"
+    row "$col" "${GR}Username${NC}   ${W}${USERNAME}${NC}"
+    row "$col" "${GR}Password${NC}   ${W}${PASSWORD}${NC}"
+    row "$col" "${GR}Expires${NC}    ${W}${EXP_DATE}${NC}  ${GR}(${DAYS} days)${NC}"
+    line_mid "$col"
+    row "$col" "${GR}NS domain${NC}  ${W}${ns}${NC}"
+    row "$col" "${GR}Resolver${NC}   ${W}1.1.1.1${NC}  ${GR}(or 8.8.8.8)${NC}"
+    line_bot "$col"
+    echo ""
+    echo -e "  ${GR}Public key${NC}"
+    echo -e "    ${LIME}${pub}${NC}"
+    echo ""
+    if systemctl is-active --quiet slowdns 2>/dev/null; then
+        ok "SlowDNS service: ${G}running${NC} — account ready to use."
+    else
+        err "SlowDNS service is ${R}stopped${NC} — start it from option 10."
+    fi
+    pause
+}
+
 delete_user() {
     section "DELETE SSH USER" "$R"
     read -rp "$(echo -e "  ${C}Username to delete${NC} : ")" USERNAME
@@ -1583,6 +1629,7 @@ while true; do
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
     menu_item "11" "🐌" "SlowDNS info / config"   "$TEAL"
+    menu_item "12" "🐌" "Create SlowDNS account"  "$LIME"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1598,6 +1645,7 @@ while true; do
         9) xray_menu ;;
         10) restart_services ;;
         11) slowdns_info ;;
+        12) create_slowdns_user ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
