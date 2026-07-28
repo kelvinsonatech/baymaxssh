@@ -41,7 +41,7 @@ warn()    { echo -e "${BYellow}[!] $*${NC}"; }
 error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
 # ── advanced installer progress HUD (single animated gradient bar) ──
-INSTALL_TOTAL=11; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
+INSTALL_TOTAL=12; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
 # simple, fast progress bar — drawn once per phase, zero added delay
 _TW=$(tput cols 2>/dev/null || echo 64); [ "$_TW" -gt 76 ] && _TW=76; [ "$_TW" -lt 44 ] && _TW=44
 phase() {  # phase "Title" — one instant redraw of the single progress line
@@ -99,10 +99,24 @@ echo ""
 read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
 DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
 
+# ── SlowDNS (DNSTT) nameserver prompt ──
+echo ""
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${TEAL}│${NC}  ${BWHITE}${BOLD}SLOWDNS SETUP${NC} ${GRY}(optional)${NC}                             ${TEAL}│${NC}"
+echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}Enter the NS host delegated to this server's IP${NC}     ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}(e.g. dns.example.com). Requires an NS + A record${NC}   ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}at your DNS host. Leave blank to skip SlowDNS.${NC}      ${TEAL}│${NC}"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}NS domain${NC} ${GRY}(blank = skip)${NC} : ")" NS_DOMAIN
+NS_DOMAIN="$(echo "$NS_DOMAIN" | tr -d '[:space:]')"
+
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
+echo "$NS_DOMAIN" > "$CONF_DIR/nsdomain.conf"
 
 # ── system info panel ──
 _OS=$( (. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME") || echo "Linux" )
@@ -200,6 +214,89 @@ EOF
 systemctl enable dropbear >/dev/null 2>&1 || true
 systemctl restart dropbear
 success "Dropbear running on ports 109 and 143"
+
+# ═══════════════════════════════════════════
+# SECTION 2b — SLOWDNS (DNSTT) over UDP 53
+# ═══════════════════════════════════════════
+phase "SlowDNS (DNSTT)"
+NS_DOMAIN=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+if [ -n "$NS_DOMAIN" ]; then
+    systemctl stop slowdns >/dev/null 2>&1 || true
+    killall dnstt-server >/dev/null 2>&1 || true
+
+    # --- Free UDP 53: systemd-resolved usually holds it and silently kills
+    #     dnstt. Disable its stub listener but keep name resolution working.
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
+        rm -f /etc/resolv.conf 2>/dev/null || true
+        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        systemctl restart systemd-resolved >/dev/null 2>&1 || true
+    fi
+    # Anything else squatting on :53 (e.g. dnsmasq) — stop it.
+    fuser -k 53/udp >/dev/null 2>&1 || true
+
+    # --- Toolchain: prefer distro golang; fall back to snap. ---
+    eval "$APT git golang-go" </dev/null >/dev/null 2>&1
+    GO_BIN="$(command -v go || true)"
+    if [ -z "$GO_BIN" ]; then
+        eval "$APT snapd" </dev/null >/dev/null 2>&1
+        systemctl enable --now snapd.socket >/dev/null 2>&1 || true
+        [ -L /snap ] || ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true
+        sleep 2
+        snap install go --classic >/dev/null 2>&1 || true
+        GO_BIN=/snap/bin/go
+    fi
+
+    # --- Build dnstt-server if we don't already have the binary. ---
+    if [ ! -x /usr/local/bin/dnstt-server ] && [ -x "$GO_BIN" ]; then
+        cd /root; rm -rf dnstt
+        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+        if [ -d dnstt/dnstt-server ]; then
+            ( cd dnstt/dnstt-server && "$GO_BIN" build >/dev/null 2>&1 \
+              && mv -f dnstt-server /usr/local/bin/dnstt-server \
+              && chmod +x /usr/local/bin/dnstt-server )
+        fi
+    fi
+
+    if [ -x /usr/local/bin/dnstt-server ]; then
+        mkdir -p /etc/slowdns
+        if [ ! -f /etc/slowdns/server.key ]; then
+            /usr/local/bin/dnstt-server -gen-key \
+                -privkey-file /etc/slowdns/server.key \
+                -pubkey-file /etc/slowdns/server.pub >/dev/null 2>&1
+        fi
+        cp -f /etc/slowdns/server.pub "$CONF_DIR/slowdns_pub.txt" 2>/dev/null || true
+
+        cat > /etc/systemd/system/slowdns.service <<EOF
+[Unit]
+Description=SlowDNS Tunnel Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable slowdns >/dev/null 2>&1 || true
+        systemctl restart slowdns >/dev/null 2>&1 || true
+        sleep 1
+        if systemctl is-active --quiet slowdns 2>/dev/null; then
+            success "SlowDNS running on UDP 53 (NS: $NS_DOMAIN)"
+        else
+            warn "SlowDNS installed but not active — check 'journalctl -u slowdns' (port 53 in use?)"
+        fi
+    else
+        warn "SlowDNS skipped — Go toolchain unavailable, could not build dnstt-server"
+    fi
+else
+    info "SlowDNS skipped — no NS domain provided"
+fi
 
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
@@ -525,9 +622,10 @@ if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
+    ufw allow 53/udp >/dev/null 2>&1
     success "UFW rules applied"
 else
-    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447"
+    warn "ufw not found — open ports manually: TCP 22 80 109 143 443 447, UDP 53"
 fi
 
 # ═══════════════════════════════════════════
@@ -842,7 +940,7 @@ status_bar() {
     read -r _rx _tx _tot <<<"$(bw_alltime)"
     row "$col" "${GR}DATA${NC}    ${W}${BOLD}$(hb "$_tot")${NC} ${GR}used${NC}"
     local svcline="${GR}SVC${NC}    "
-    for s in ssh dropbear ws-proxy stunnel4; do
+    for s in ssh dropbear ws-proxy stunnel4 slowdns; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
         svcline+="${dot} ${s}   "
     done
@@ -860,6 +958,10 @@ show_ports() {
     row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
     row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
     row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
+    local _ns; _ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    if [ -n "$_ns" ]; then
+        row "$col" "${LIME}▸${NC} SlowDNS (UDP 53)     ${GR}→${NC} ${W}${_ns}${NC}"
+    fi
     line_bot "$col"
 }
 
@@ -1017,7 +1119,7 @@ renew_user() {
 
 service_status() {
     section "SERVICE STATUS" "$P"
-    local col="$P" svcs="ssh dropbear ws-proxy stunnel4"
+    local col="$P" svcs="ssh dropbear ws-proxy stunnel4 slowdns"
     [ -f /usr/local/bin/xray ] && svcs="$svcs xray"
     line_top "$col"
     for svc in $svcs; do
@@ -1039,7 +1141,36 @@ restart_services() {
     systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
     systemctl restart stunnel4 2>/dev/null
+    systemctl restart slowdns 2>/dev/null
     ok "All services restarted."
+    pause
+}
+
+slowdns_info() {
+    section "SLOWDNS INFO" "$TEAL"
+    local ns pub
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat "$CONF_DIR/slowdns_pub.txt" 2>/dev/null)
+    if [ -z "$ns" ] || [ -z "$pub" ]; then
+        err "SlowDNS is not configured on this server."
+        note "Re-run the installer and enter an NS domain to enable it."
+        pause; return
+    fi
+    if systemctl is-active --quiet slowdns 2>/dev/null; then
+        ok "Service: ${G}running${NC} (UDP 53)"
+    else
+        err "Service: ${R}stopped${NC}  — use option 10 to restart"
+    fi
+    echo ""
+    echo -e "  ${GR}NS domain${NC}"
+    echo -e "    ${W}${BOLD}${ns}${NC}"
+    echo ""
+    echo -e "  ${GR}Public key${NC}"
+    echo -e "    ${LIME}${pub}${NC}"
+    echo ""
+    echo -e "  ${GR}DNS resolver${NC}  ${W}1.1.1.1${NC}  ${GR}(or 8.8.8.8)${NC}"
+    echo ""
+    echo -e "  ${GR}Login${NC}  use any SSH user (option 1) — SlowDNS tunnels to SSH."
     pause
 }
 
@@ -1451,6 +1582,7 @@ while true; do
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
+    menu_item "11" "🐌" "SlowDNS info / config"   "$TEAL"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1465,6 +1597,7 @@ while true; do
         8) bandwidth ;;
         9) xray_menu ;;
         10) restart_services ;;
+        11) slowdns_info ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
@@ -1508,6 +1641,9 @@ printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL direct SSH (TLS)" "447"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "OpenSSH" "22"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "Dropbear" "109, 143"
+if [ -n "$NS_DOMAIN" ] && [ -x /usr/local/bin/dnstt-server ]; then
+    printf "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SlowDNS (UDP 53)" "$NS_DOMAIN"
+fi
 echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}DEFAULT USERS${NC} ${GRY}(pass: 0000, ${DEFAULT_USER_DAYS}d)${NC} ${TEAL}────────────────────┤${NC}"
 printf  "  ${TEAL}│${NC}   ${PINK}●${NC} %-50s${TEAL}│${NC}\n" "deon · febo · geto · weon · ceon"
 echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
@@ -1515,6 +1651,10 @@ echo ""
 echo -e "  ${GRY}Client tips${NC}"
 echo -e "    ${DIM}WS payload${NC}  GET / HTTP/1.1[crlf]Host: ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}[crlf]Upgrade: websocket[crlf][crlf]"
 echo -e "    ${DIM}SSL/SNI${NC}     ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
+if [ -n "$NS_DOMAIN" ] && [ -f "$CONF_DIR/slowdns_pub.txt" ]; then
+    echo -e "    ${DIM}SlowDNS${NC}     NS ${BWHITE}${NS_DOMAIN}${NC}  ${GRY}pubkey:${NC}"
+    echo -e "                ${LIME}$(cat "$CONF_DIR/slowdns_pub.txt")${NC}"
+fi
 echo ""
 echo -e "  ${TEAL}${BOLD}▸${NC} Type ${LIME}${BOLD}menu${NC} to open the control panel and create users."
 echo ""

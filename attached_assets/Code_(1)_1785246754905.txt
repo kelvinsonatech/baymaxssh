@@ -1,0 +1,921 @@
+    },
+    {
+      "port": 10002,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin", "alterId": 0}]},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/api/vmess"}}
+    },
+    {
+      "port": 4433,
+      "protocol": "vless",
+      "tag": "vless-reality",
+      "settings": {"clients": [], "decryption": "none"},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    },
+    {
+      "port": 2083,
+      "protocol": "trojan",
+      "tag": "trojan-reality",
+      "settings": {"clients": []},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    }
+  ],
+  "outbounds": [{"protocol": "freedom","settings": {}}]
+}
+EOF
+
+systemctl daemon-reload
+systemctl restart xray && systemctl enable xray >/dev/null 2>&1
+clear
+echo -e "${BGreen}======================================================${NC}"
+echo -e "${BPurple}   PART 2 COMPLETE: PROTOCOLS INSTALLED SUCCESSFULLY  ${NC}"
+echo -e "${BGreen}======================================================${NC}"
+menu
+#!/bin/bash
+# ==========================================================
+# FIREWALLFALCON v5.2 TITAN EDITION - PART 2: PROTOCOLS
+# ==========================================================
+source /etc/falcon/core/env.conf
+BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'; BPurple='\033[1;35m'; NC='\033[0m'
+echo -e "${BYellow}[*] Disabling interactive pop-ups & repairing package manager...${NC}"
+export DEBIAN_FRONTEND=noninteractive
+sed -i 's/#$nrconf{restart} = '"'"'i'"'"';/$nrconf{restart} = '"'"'a'"'"';/g' /etc/needrestart/needrestart.conf 2>/dev/null
+dpkg --configure -a --force-confdef --force-confold >/dev/null 2>&1
+apt-get install -f -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" < /dev/null >/dev/null 2>&1
+apt-get update -y < /dev/null >/dev/null 2>&1
+fun_bar() {     CMD="$1";     (          [[ -e $HOME/falcon.log ]] && rm $HOME/falcon.log;         DEBIAN_FRONTEND=noninteractive eval "$CMD -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"" < /dev/null >/dev/null 2>&1;         touch $HOME/falcon.log ;     ) &     tput civis; echo -ne "  ${BYellow}Processing...${NC} ";     while true; do         for ((i = 0; i < 18; i++)); do echo -ne "${BCyan}█${NC}"; sleep 0.1; done;         if [[ -e $HOME/falcon.log ]]; then rm $HOME/falcon.log; echo -e " ${BGreen}[ DONE ]${NC}"; tput cnorm; break; fi;         echo -ne "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"; for ((i = 0; i < 18; i++)); do echo -ne " "; sleep 0.05; done; echo -ne "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b";     done; }
+clear
+echo -e "${BCyan}======================================================${NC}"
+echo -e "${BPurple}      INSTALLING MULTI-PROTOCOL VPN ENGINES           ${NC}"
+echo -e "${BCyan}======================================================${NC}"
+# 1. DROPBEAR & PYTHON WEBSOCKET 
+echo -e "\n${BYellow}[*] Installing Dropbear & WS Proxy...${NC}"
+echo -ne " installing dropbear    "; fun_bar "apt-get install dropbear"
+mkdir -p /etc/dropbear
+dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key >/dev/null 2>&1 || true
+dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key >/dev/null 2>&1 || true
+dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key >/dev/null 2>&1 || true
+dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1 || true
+echo "/bin/false" >> /etc/shells
+cat <<EOF > /etc/default/dropbear
+NO_START=0
+DROPBEAR_PORT=109
+DROPBEAR_EXTRA_ARGS="-p 143 -I 60 -K 30"
+DROPBEAR_BANNER=""
+DROPBEAR_RECEIVE_WINDOW=65536
+EOF
+
+systemctl restart dropbear
+cat <<'EOF' > /usr/local/bin/ws-proxy.py
+import socket, threading
+
+def handle_client(client_socket):
+    client_socket.settimeout(15)
+    ssh_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ssh_socket.settimeout(15)
+    try:
+        ssh_socket.connect(('127.0.0.1', 109))
+        req = b""
+        while True:
+            data = client_socket.recv(1)
+            if not data: break
+            req += data
+            if b"\r\n\r\n" in req: break
+            
+        client_socket.send(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        
+        client_socket.settimeout(None)
+        ssh_socket.settimeout(None)
+        
+        def forward(src, dst):
+            try:
+                while True:
+                    buffer = src.recv(8192)
+                    if not buffer: break
+                    dst.send(buffer)
+            except: pass
+            finally: 
+                src.close()
+                dst.close()
+                
+        threading.Thread(target=forward, args=(client_socket, ssh_socket)).start()
+        threading.Thread(target=forward, args=(ssh_socket, client_socket)).start()
+    except: 
+        client_socket.close()
+        ssh_socket.close()
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(('127.0.0.1', 8880))
+server.listen(5000)
+while True:
+    try:
+        client_socket, addr = server.accept()
+        threading.Thread(target=handle_client, args=(client_socket,)).start()
+    except: pass
+EOF
+
+chmod +x /usr/local/bin/ws-proxy.py
+cat <<EOF > /etc/systemd/system/ws-proxy.service
+[Unit]
+Description=Python SSH-WebSocket Proxy
+After=network.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/ws-proxy.py
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now ws-proxy >/dev/null 2>&1
+# 2. SSL, NGINX & STUNNEL
+echo -e "\n${BYellow}[*] Generating Let's Encrypt SSL, Nginx & Stunnel...${NC}"
+echo -ne " installing nginx/ssl   "; fun_bar "apt-get install nginx certbot stunnel4"
+systemctl stop nginx
+certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos --register-unsafely-without-email >/dev/null 2>&1
+chmod -R 755 /etc/letsencrypt/archive
+chmod -R 755 /etc/letsencrypt/live
+cat <<EOF > /etc/nginx/sites-available/default
+server {
+    listen 80; listen 443 ssl http2; server_name _;
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8880; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+    
+    location /vless {
+        proxy_redirect off; proxy_pass http://127.0.0.1:10000; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+    
+    location /api/v1/connect {
+        proxy_redirect off; proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+    
+    location /api/vmess {
+        proxy_redirect off; proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+}
+EOF
+
+systemctl restart nginx
+mkdir -p /etc/stunnel
+if [ -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then     cat /etc/letsencrypt/live/$DOMAIN/fullchain.pem /etc/letsencrypt/live/$DOMAIN/privkey.pem > /etc/stunnel/stunnel.pem; else     openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 -subj "/C=NG/ST=Enugu/L=Enugu/O=FirewallFalcon/CN=$DOMAIN" -keyout /etc/stunnel/stunnel.pem -out /etc/stunnel/stunnel.pem >/dev/null 2>&1; fi
+sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null
+cat <<EOF > /etc/stunnel/stunnel.conf
+pid = /var/run/stunnel.pid
+cert = /etc/stunnel/stunnel.pem
+client = no
+socket = a:SO_REUSEADDR=1
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+[ssh-ssl]
+accept = 447
+connect = 127.0.0.1:22
+[dropbear-ssl]
+accept = 777
+connect = 127.0.0.1:109
+[wss-bypass]
+accept = 444
+connect = 127.0.0.1:8880
+EOF
+
+systemctl restart stunnel4 >/dev/null 2>&1
+ufw allow 444/tcp >/dev/null 2>&1
+# 3. SLOWDNS (DNSTT)
+echo -e "\n${BYellow}[*] Compiling SlowDNS Server...${NC}"
+systemctl stop slowdns >/dev/null 2>&1
+killall dnstt-server >/dev/null 2>&1
+echo -ne " initializing snapd     "; fun_bar "apt-get install snapd"
+systemctl enable --now snapd.socket >/dev/null 2>&1
+if [ ! -L /snap ]; then     ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true; fi
+sleep 2
+snap install go --classic >/dev/null 2>&1
+apt-get install git -y < /dev/null >/dev/null 2>&1
+cd /root; rm -rf dnstt; git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+cd dnstt/dnstt-server
+/snap/bin/go build >/dev/null 2>&1
+mv dnstt-server /usr/local/bin/dnstt-server && chmod +x /usr/local/bin/dnstt-server
+mkdir -p /etc/slowdns && cd /etc/slowdns
+/usr/local/bin/dnstt-server -gen-key -privkey-file server.key -pubkey-file server.pub
+PUB_KEY=$(cat server.pub)
+echo "$PUB_KEY" > /etc/falcon/core/slowdns_pub.txt
+cat <<EOF > /etc/systemd/system/slowdns.service
+[Unit]
+Description=SlowDNS Tunnel Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key $NS_DOMAIN 127.0.0.1:22
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now slowdns >/dev/null 2>&1
+# 4. BADVPN UDPGW
+echo -e "\n${BYellow}[*] Installing BadVPN UDPGW...${NC}"
+systemctl stop badvpn >/dev/null 2>&1
+killall badvpn-udpgw >/dev/null 2>&1
+rm -f /usr/local/bin/badvpn-udpgw
+wget -qO /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+chmod +x /usr/local/bin/badvpn-udpgw
+cat << 'EOF' > /etc/systemd/system/badvpn.service
+[Unit]
+Description=BadVPN UDPGW Service
+[Service]
+ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500 --max-connections-for-client 10
+Restart=always
+User=nobody
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now badvpn >/dev/null 2>&1
+# 5. XRAY-CORE (WITH DYNAMIC CRYPTO KEYS)
+echo -e "\n${BYellow}[*] Installing Xray-Core & Generating Keys...${NC}"
+apt-get install unzip jq net-tools curl -y < /dev/null >/dev/null 2>&1
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+mkdir -p /etc/falcon/core
+XRAY_KEYS=$(/usr/local/bin/xray x25519)
+REALITY_PRIV=$(echo "$XRAY_KEYS" | grep -i "Private" | awk '{print $NF}')
+REALITY_PUB=$(echo "$XRAY_KEYS" | grep -i "Public" | awk '{print $NF}')
+echo "$REALITY_PUB" > /etc/falcon/core/reality_pub.txt
+MASTER_UUID=$(uuidgen)
+mkdir -p /usr/local/etc/xray
+mkdir -p /var/log/xray; touch /var/log/xray/access.log /var/log/xray/error.log
+cat <<EOF > /usr/local/etc/xray/config.json
+{
+  "log": {"loglevel": "warning", "access": "/var/log/xray/access.log", "error": "/var/log/xray/error.log"},
+  "inbounds": [
+    {
+      "port": 10000,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin"}], "decryption": "none"},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/vless"}}
+    },
+    {
+      "port": 10001,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin"}], "decryption": "none"},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/api/v1/connect"}}
+    },
+    {
+      "port": 10002,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin", "alterId": 0}]},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/api/vmess"}}
+    },
+    {
+      "port": 4433,
+      "protocol": "vless",
+      "tag": "vless-reality",
+      "settings": {"clients": [], "decryption": "none"},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    },
+    {
+      "port": 2083,
+      "protocol": "trojan",
+      "tag": "trojan-reality",
+      "settings": {"clients": []},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    }
+  ],
+  "outbounds": [{"protocol": "freedom","settings": {}}]
+}
+EOF
+
+systemctl daemon-reload
+systemctl restart xray && systemctl enable xray >/dev/null 2>&1
+# ==========================================
+# 6. HYSTERIA 2 (UDP BYPASS PROTOCOL)
+# ==========================================
+echo -e "\n${BYellow}[*] Installing Hysteria 2...${NC}"
+# Download and install the official Hysteria 2 binary
+bash <(curl -fsSL https://get.hy2.sh/) >/dev/null 2>&1
+mkdir -p /etc/hysteria
+mkdir -p /etc/falcon/data
+touch /etc/falcon/data/hy2_users.txt
+chmod 755 /etc/falcon
+chmod 755 /etc/falcon/data
+chmod 644 /etc/falcon/data/hy2_users.txt
+# Create Bash Auth Script for Multi-User Support (Unbuffered, Sandbox-Safe)
+cat << 'EOF' > /etc/hysteria/auth.sh
+#!/bin/bash
+# Grab all input instantly without waiting for a newline
+INPUT=$(cat)
+
+# Extract the password the user typed
+PASS=$(echo "$INPUT" | jq -r '.auth' 2>/dev/null)
+
+if [ -z "$PASS" ] || [ "$PASS" == "null" ]; then
+    echo "false"
+    exit 0
+fi
+
+# Scrub the database of any invisible formatting (\r) that causes false rejections
+sed -i 's/\r//g' /etc/falcon/data/hy2_users.txt
+
+# Verify the password
+if awk '{print $2}' /etc/falcon/data/hy2_users.txt 2>/dev/null | grep -q -x "$PASS"; then
+    echo "true"
+else
+    echo "false"
+fi
+EOF
+
+chmod +x /etc/hysteria/auth.sh
+# Create Hysteria Config mapped to your Domain's SSL (Defaults to 4430 initially)
+cat <<EOF > /etc/hysteria/config.yaml
+listen: :4430
+tls:
+  cert: /etc/letsencrypt/live/$DOMAIN/fullchain.pem
+  key: /etc/letsencrypt/live/$DOMAIN/privkey.pem
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.bing.com
+    rewriteHost: true
+auth:
+  type: command
+  command: /etc/hysteria/auth.sh
+EOF
+
+# Overwrite Systemd Sandbox to allow pure Root execution
+cat << 'EOF' > /etc/systemd/system/hysteria-server.service
+[Unit]
+Description=Hysteria 2 Server Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hysteria server --config /etc/hysteria/config.yaml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now hysteria-server.service >/dev/null 2>&1
+ufw allow 4430/udp >/dev/null 2>&1
+ufw allow 53/udp >/dev/null 2>&1
+clear
+echo -e "${BGreen}======================================================${NC}"
+echo -e "${BPurple}   PART 2 COMPLETE: PROTOCOLS INSTALLED SUCCESSFULLY  ${NC}"
+echo -e "${BGreen}======================================================${NC}"
+menu
+menu
+menu
+menu
+echo -e "\n${BYellow}[*] Compiling SlowDNS Server...${NC}"
+systemctl stop slowdns >/dev/null 2>&1
+killall dnstt-server >/dev/null 2>&1
+echo -ne " initializing snapd     "; fun_bar "apt-get install snapd"
+systemctl enable --now snapd.socket >/dev/null 2>&1
+if [ ! -L /snap ]; then     ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true; fi
+sleep 2
+snap install go --classic >/dev/null 2>&1
+apt-get install git -y < /dev/null >/dev/null 2>&1
+cd /root; rm -rf dnstt; git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+cd dnstt/dnstt-server
+/snap/bin/go build >/dev/null 2>&1
+mv dnstt-server /usr/local/bin/dnstt-server && chmod +x /usr/local/bin/dnstt-server
+mkdir -p /etc/slowdns && cd /etc/slowdns
+/usr/local/bin/dnstt-server -gen-key -privkey-file server.key -pubkey-file server.pub
+PUB_KEY=$(cat server.pub)
+echo "$PUB_KEY" > /etc/falcon/core/slowdns_pub.txt
+cat <<EOF > /etc/systemd/system/slowdns.service
+[Unit]
+Description=SlowDNS Tunnel Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key $NS_DOMAIN 127.0.0.1:22
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now slowdns >/dev/null 2>&1
+# 4. BADVPN UDPGW
+echo -e "\n${BYellow}[*] Installing BadVPN UDPGW...${NC}"
+systemctl stop badvpn >/dev/null 2>&1
+killall badvpn-udpgw >/dev/null 2>&1
+rm -f /usr/local/bin/badvpn-udpgw
+wget -qO /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+chmod +x /usr/local/bin/badvpn-udpgw
+cat << 'EOF' > /etc/systemd/system/badvpn.service
+[Unit]
+Description=BadVPN UDPGW Service
+[Service]
+ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500 --max-connections-for-client 10
+Restart=always
+User=nobody
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now badvpn >/dev/null 2>&1
+# 5. XRAY-CORE (WITH DYNAMIC CRYPTO KEYS)
+echo -e "\n${BYellow}[*] Installing Xray-Core & Generating Keys...${NC}"
+apt-get install unzip jq net-tools curl -y < /dev/null >/dev/null 2>&1
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+mkdir -p /etc/falcon/core
+XRAY_KEYS=$(/usr/local/bin/xray x25519)
+REALITY_PRIV=$(echo "$XRAY_KEYS" | grep -i "Private" | awk '{print $NF}')
+REALITY_PUB=$(echo "$XRAY_KEYS" | grep -i "Public" | awk '{print $NF}')
+echo "$REALITY_PUB" > /etc/falcon/core/reality_pub.txt
+MASTER_UUID=$(uuidgen)
+mkdir -p /usr/local/etc/xray
+mkdir -p /var/log/xray; touch /var/log/xray/access.log /var/log/xray/error.log
+cat <<EOF > /usr/local/etc/xray/config.json
+{
+  "log": {"loglevel": "warning", "access": "/var/log/xray/access.log", "error": "/var/log/xray/error.log"},
+  "inbounds": [
+    {
+      "port": 10000,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin"}], "decryption": "none"},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/vless"}}
+    },
+    {
+      "port": 10001,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin"}], "decryption": "none"},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/api/v1/connect"}}
+    },
+    {
+      "port": 10002,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin", "alterId": 0}]},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/api/vmess"}}
+    },
+    {
+      "port": 4433,
+      "protocol": "vless",
+      "tag": "vless-reality",
+      "settings": {"clients": [], "decryption": "none"},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    },
+    {
+      "port": 2083,
+      "protocol": "trojan",
+      "tag": "trojan-reality",
+      "settings": {"clients": []},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    }
+  ],
+  "outbounds": [{"protocol": "freedom","settings": {}}]
+}
+EOF
+
+systemctl daemon-reload
+systemctl restart xray && systemctl enable xray >/dev/null 2>&1
+clear
+echo -e "${BGreen}======================================================${NC}"
+echo -e "${BPurple}   PART 2 COMPLETE: PROTOCOLS INSTALLED SUCCESSFULLY  ${NC}"
+echo -e "${BGreen}======================================================${NC}"
+menu
+#!/bin/bash
+# ==========================================================
+# FIREWALLFALCON v5.2 TITAN EDITION - PART 2: PROTOCOLS
+# ==========================================================
+source /etc/falcon/core/env.conf
+BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'; BPurple='\033[1;35m'; NC='\033[0m'
+echo -e "${BYellow}[*] Disabling interactive pop-ups & repairing package manager...${NC}"
+export DEBIAN_FRONTEND=noninteractive
+sed -i 's/#$nrconf{restart} = '"'"'i'"'"';/$nrconf{restart} = '"'"'a'"'"';/g' /etc/needrestart/needrestart.conf 2>/dev/null
+dpkg --configure -a --force-confdef --force-confold >/dev/null 2>&1
+apt-get install -f -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" < /dev/null >/dev/null 2>&1
+apt-get update -y < /dev/null >/dev/null 2>&1
+fun_bar() {     CMD="$1";     (          [[ -e $HOME/falcon.log ]] && rm $HOME/falcon.log;         DEBIAN_FRONTEND=noninteractive eval "$CMD -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"" < /dev/null >/dev/null 2>&1;         touch $HOME/falcon.log ;     ) &     tput civis; echo -ne "  ${BYellow}Processing...${NC} ";     while true; do         for ((i = 0; i < 18; i++)); do echo -ne "${BCyan}█${NC}"; sleep 0.1; done;         if [[ -e $HOME/falcon.log ]]; then rm $HOME/falcon.log; echo -e " ${BGreen}[ DONE ]${NC}"; tput cnorm; break; fi;         echo -ne "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"; for ((i = 0; i < 18; i++)); do echo -ne " "; sleep 0.05; done; echo -ne "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b";     done; }
+clear
+echo -e "${BCyan}======================================================${NC}"
+echo -e "${BPurple}      INSTALLING MULTI-PROTOCOL VPN ENGINES           ${NC}"
+echo -e "${BCyan}======================================================${NC}"
+# 1. DROPBEAR & PYTHON WEBSOCKET 
+echo -e "\n${BYellow}[*] Installing Dropbear & WS Proxy...${NC}"
+echo -ne " installing dropbear    "; fun_bar "apt-get install dropbear"
+mkdir -p /etc/dropbear
+dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key >/dev/null 2>&1 || true
+dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key >/dev/null 2>&1 || true
+dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key >/dev/null 2>&1 || true
+dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1 || true
+echo "/bin/false" >> /etc/shells
+cat <<EOF > /etc/default/dropbear
+NO_START=0
+DROPBEAR_PORT=109
+DROPBEAR_EXTRA_ARGS="-p 143 -I 60 -K 30"
+DROPBEAR_BANNER=""
+DROPBEAR_RECEIVE_WINDOW=65536
+EOF
+
+systemctl restart dropbear
+cat <<'EOF' > /usr/local/bin/ws-proxy.py
+import socket, threading
+
+def handle_client(client_socket):
+    client_socket.settimeout(15)
+    ssh_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ssh_socket.settimeout(15)
+    try:
+        ssh_socket.connect(('127.0.0.1', 109))
+        req = b""
+        while True:
+            data = client_socket.recv(1)
+            if not data: break
+            req += data
+            if b"\r\n\r\n" in req: break
+            
+        client_socket.send(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        
+        client_socket.settimeout(None)
+        ssh_socket.settimeout(None)
+        
+        def forward(src, dst):
+            try:
+                while True:
+                    buffer = src.recv(8192)
+                    if not buffer: break
+                    dst.send(buffer)
+            except: pass
+            finally: 
+                src.close()
+                dst.close()
+                
+        threading.Thread(target=forward, args=(client_socket, ssh_socket)).start()
+        threading.Thread(target=forward, args=(ssh_socket, client_socket)).start()
+    except: 
+        client_socket.close()
+        ssh_socket.close()
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(('127.0.0.1', 8880))
+server.listen(5000)
+while True:
+    try:
+        client_socket, addr = server.accept()
+        threading.Thread(target=handle_client, args=(client_socket,)).start()
+    except: pass
+EOF
+
+chmod +x /usr/local/bin/ws-proxy.py
+cat <<EOF > /etc/systemd/system/ws-proxy.service
+[Unit]
+Description=Python SSH-WebSocket Proxy
+After=network.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/ws-proxy.py
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now ws-proxy >/dev/null 2>&1
+# 2. SSL, NGINX & STUNNEL
+echo -e "\n${BYellow}[*] Generating Let's Encrypt SSL, Nginx & Stunnel...${NC}"
+echo -ne " installing nginx/ssl   "; fun_bar "apt-get install nginx certbot stunnel4"
+systemctl stop nginx
+certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos --register-unsafely-without-email >/dev/null 2>&1
+chmod -R 755 /etc/letsencrypt/archive
+chmod -R 755 /etc/letsencrypt/live
+cat <<EOF > /etc/nginx/sites-available/default
+server {
+    listen 80; listen 443 ssl http2; server_name _;
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8880; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+    
+    location /vless {
+        proxy_redirect off; proxy_pass http://127.0.0.1:10000; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+    
+    location /api/v1/connect {
+        proxy_redirect off; proxy_pass http://127.0.0.1:10001; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+    
+    location /api/vmess {
+        proxy_redirect off; proxy_pass http://127.0.0.1:10002; proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host \$host;
+        proxy_buffering off; proxy_read_timeout 3600; proxy_send_timeout 3600;
+    }
+}
+EOF
+
+systemctl restart nginx
+mkdir -p /etc/stunnel
+if [ -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then     cat /etc/letsencrypt/live/$DOMAIN/fullchain.pem /etc/letsencrypt/live/$DOMAIN/privkey.pem > /etc/stunnel/stunnel.pem; else     openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 -subj "/C=NG/ST=Enugu/L=Enugu/O=FirewallFalcon/CN=$DOMAIN" -keyout /etc/stunnel/stunnel.pem -out /etc/stunnel/stunnel.pem >/dev/null 2>&1; fi
+sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null
+cat <<EOF > /etc/stunnel/stunnel.conf
+pid = /var/run/stunnel.pid
+cert = /etc/stunnel/stunnel.pem
+client = no
+socket = a:SO_REUSEADDR=1
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+[ssh-ssl]
+accept = 447
+connect = 127.0.0.1:22
+[dropbear-ssl]
+accept = 777
+connect = 127.0.0.1:109
+[wss-bypass]
+accept = 444
+connect = 127.0.0.1:8880
+EOF
+
+systemctl restart stunnel4 >/dev/null 2>&1
+ufw allow 444/tcp >/dev/null 2>&1
+# 3. SLOWDNS (DNSTT)
+echo -e "\n${BYellow}[*] Compiling SlowDNS Server...${NC}"
+systemctl stop slowdns >/dev/null 2>&1
+killall dnstt-server >/dev/null 2>&1
+echo -ne " initializing snapd     "; fun_bar "apt-get install snapd"
+systemctl enable --now snapd.socket >/dev/null 2>&1
+if [ ! -L /snap ]; then     ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true; fi
+sleep 2
+snap install go --classic >/dev/null 2>&1
+apt-get install git -y < /dev/null >/dev/null 2>&1
+cd /root; rm -rf dnstt; git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+cd dnstt/dnstt-server
+/snap/bin/go build >/dev/null 2>&1
+mv dnstt-server /usr/local/bin/dnstt-server && chmod +x /usr/local/bin/dnstt-server
+mkdir -p /etc/slowdns && cd /etc/slowdns
+/usr/local/bin/dnstt-server -gen-key -privkey-file server.key -pubkey-file server.pub
+PUB_KEY=$(cat server.pub)
+echo "$PUB_KEY" > /etc/falcon/core/slowdns_pub.txt
+cat <<EOF > /etc/systemd/system/slowdns.service
+[Unit]
+Description=SlowDNS Tunnel Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key $NS_DOMAIN 127.0.0.1:22
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now slowdns >/dev/null 2>&1
+# 4. BADVPN UDPGW
+echo -e "\n${BYellow}[*] Installing BadVPN UDPGW...${NC}"
+systemctl stop badvpn >/dev/null 2>&1
+killall badvpn-udpgw >/dev/null 2>&1
+rm -f /usr/local/bin/badvpn-udpgw
+wget -qO /usr/local/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+chmod +x /usr/local/bin/badvpn-udpgw
+cat << 'EOF' > /etc/systemd/system/badvpn.service
+[Unit]
+Description=BadVPN UDPGW Service
+[Service]
+ExecStart=/usr/local/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500 --max-connections-for-client 10
+Restart=always
+User=nobody
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable --now badvpn >/dev/null 2>&1
+# 5. XRAY-CORE (WITH DYNAMIC CRYPTO KEYS)
+echo -e "\n${BYellow}[*] Installing Xray-Core & Generating Keys...${NC}"
+apt-get install unzip jq net-tools curl -y < /dev/null >/dev/null 2>&1
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+mkdir -p /etc/falcon/core
+XRAY_KEYS=$(/usr/local/bin/xray x25519)
+REALITY_PRIV=$(echo "$XRAY_KEYS" | grep -i "Private" | awk '{print $NF}')
+REALITY_PUB=$(echo "$XRAY_KEYS" | grep -i "Public" | awk '{print $NF}')
+echo "$REALITY_PUB" > /etc/falcon/core/reality_pub.txt
+MASTER_UUID=$(uuidgen)
+mkdir -p /usr/local/etc/xray
+mkdir -p /var/log/xray; touch /var/log/xray/access.log /var/log/xray/error.log
+cat <<EOF > /usr/local/etc/xray/config.json
+{
+  "log": {"loglevel": "warning", "access": "/var/log/xray/access.log", "error": "/var/log/xray/error.log"},
+  "inbounds": [
+    {
+      "port": 10000,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin"}], "decryption": "none"},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/vless"}}
+    },
+    {
+      "port": 10001,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin"}], "decryption": "none"},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/api/v1/connect"}}
+    },
+    {
+      "port": 10002,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {"clients": [{"id": "$MASTER_UUID", "email": "master_admin", "alterId": 0}]},
+      "streamSettings": {"network": "ws", "wsSettings": {"path": "/api/vmess"}}
+    },
+    {
+      "port": 4433,
+      "protocol": "vless",
+      "tag": "vless-reality",
+      "settings": {"clients": [], "decryption": "none"},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    },
+    {
+      "port": 2083,
+      "protocol": "trojan",
+      "tag": "trojan-reality",
+      "settings": {"clients": []},
+      "streamSettings": {
+        "network": "tcp", "security": "reality",
+        "realitySettings": {
+          "show": false, "dest": "www.google.com:443", "xver": 0,
+          "serverNames": ["www.google.com", "google.com"],
+          "privateKey": "$REALITY_PRIV",
+          "shortIds": [""]
+        }
+      }
+    }
+  ],
+  "outbounds": [{"protocol": "freedom","settings": {}}]
+}
+EOF
+
+systemctl daemon-reload
+systemctl restart xray && systemctl enable xray >/dev/null 2>&1
+# ==========================================
+# 6. HYSTERIA 2 (UDP BYPASS PROTOCOL)
+# ==========================================
+echo -e "\n${BYellow}[*] Installing Hysteria 2...${NC}"
+# Download and install the official Hysteria 2 binary
+bash <(curl -fsSL https://get.hy2.sh/) >/dev/null 2>&1
+mkdir -p /etc/hysteria
+mkdir -p /etc/falcon/data
+touch /etc/falcon/data/hy2_users.txt
+chmod 755 /etc/falcon
+chmod 755 /etc/falcon/data
+chmod 644 /etc/falcon/data/hy2_users.txt
+# Create Bash Auth Script for Multi-User Support (Unbuffered, Sandbox-Safe)
+cat << 'EOF' > /etc/hysteria/auth.sh
+#!/bin/bash
+# Grab all input instantly without waiting for a newline
+INPUT=$(cat)
+
+# Extract the password the user typed
+PASS=$(echo "$INPUT" | jq -r '.auth' 2>/dev/null)
+
+if [ -z "$PASS" ] || [ "$PASS" == "null" ]; then
+    echo "false"
+    exit 0
+fi
+
+# Scrub the database of any invisible formatting (\r) that causes false rejections
+sed -i 's/\r//g' /etc/falcon/data/hy2_users.txt
+
+# Verify the password
+if awk '{print $2}' /etc/falcon/data/hy2_users.txt 2>/dev/null | grep -q -x "$PASS"; then
+    echo "true"
+else
+    echo "false"
+fi
+EOF
+
+chmod +x /etc/hysteria/auth.sh
+# Create Hysteria Config mapped to your Domain's SSL (Defaults to 4430 initially)
+cat <<EOF > /etc/hysteria/config.yaml
+listen: :4430
+tls:
+  cert: /etc/letsencrypt/live/$DOMAIN/fullchain.pem
+  key: /etc/letsencrypt/live/$DOMAIN/privkey.pem
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.bing.com
+    rewriteHost: true
+auth:
+  type: command
+  command: /etc/hysteria/auth.sh
+EOF
+
+# Overwrite Systemd Sandbox to allow pure Root execution
+cat << 'EOF' > /etc/systemd/system/hysteria-server.service
+[Unit]
+Description=Hysteria 2 Server Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hysteria server --config /etc/hysteria/config.yaml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now hysteria-server.service >/dev/null 2>&1
+ufw allow 4430/udp >/dev/null 2>&1
+ufw allow 53/udp >/dev/null 2>&1
+clear
+echo -e "${BGreen}======================================================${NC}"
+echo -e "${BPurple}   PART 2 COMPLETE: PROTOCOLS INSTALLED SUCCESSFULLY  ${NC}"
+echo -e "${BGreen}======================================================${NC}"
+menu
+menu
+menu
+menu
+root@localhost:~# 
