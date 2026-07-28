@@ -42,43 +42,18 @@ error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
 # ── advanced installer progress HUD (single animated gradient bar) ──
 INSTALL_TOTAL=11; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
-# rotating orb spinner + rainbow spectrum for the bar fill
-_frames='◐◓◑◒'
-_spec=(201 165 129 93 63 33 39 45 51 50 49 48 47 46 82 118 154 190 226 220 214 208 202 196)
-_shim=0   # moving shimmer position
-_termw() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 76 ] && c=76; [ "$c" -lt 44 ] && c=44; echo "$c"; }
-_bar() {  # _bar <pct> <frame> <label> — redraw ONE line in place, rainbow style
-    local pct="$1" fr="$2" lbl="$3" w bw fl em i el ns ci
-    w=$(_termw); printf -v lbl "%-16.16s" "$lbl"; el=$(( SECONDS - INSTALL_T0 ))
-    bw=$(( w - 44 )); [ "$bw" -lt 10 ] && bw=10
-    fl=$(( bw * pct / 100 )); em=$(( bw - fl )); ns=${#_spec[@]}
-    # step counter with a rotating color, orb spinner, label
-    ci=${_spec[$(( INSTALL_STEP % ns ))]}
-    printf "\r\033[K \033[38;5;%sm[${BOLD}%2d${NC}\033[38;5;%sm/%d]${NC} \033[38;5;51m${BOLD}%s${NC} ${BWHITE}%s${NC} ${GRY}▕${NC}" \
-        "$ci" "$INSTALL_STEP" "$ci" "$INSTALL_TOTAL" "$fr" "$lbl"
-    # rainbow filled cells; the shimmer cell flashes bright white
-    i=0
-    while [ "$i" -lt "$fl" ]; do
-        if [ "$i" = "$(( fl - 1 ))" ] || [ "$(( (i + _shim) % 7 ))" = "0" ]; then
-            printf "${BWHITE}█"
-        else
-            ci=${_spec[$(( i * ns / bw ))]}
-            printf "\033[38;5;%sm█" "$ci"
-        fi
-        i=$(( i + 1 ))
-    done
-    printf "${GRY}"; i=0; while [ "$i" -lt "$em" ]; do printf "·"; i=$(( i + 1 )); done
-    printf "${NC}${GRY}▏${NC} \033[38;5;51m${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" "$pct" "$el"
-    _shim=$(( (_shim + 1) % 7 ))
-}
-phase() {  # phase "Title" — fill the single bar up to this step's target %
-    INSTALL_STEP=$(( INSTALL_STEP + 1 )); local t="$1" tg fi=0
-    tg=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
-    while [ "$PROG_PCT" -lt "$tg" ]; do
-        PROG_PCT=$(( PROG_PCT + 2 )); [ "$PROG_PCT" -gt "$tg" ] && PROG_PCT=$tg
-        fi=$(( (fi + 1) % ${#_frames} )); _bar "$PROG_PCT" "${_frames:$fi:1}" "$t"; sleep 0.01
-    done
-    _bar "$PROG_PCT" "✔" "$t"
+# simple, fast progress bar — drawn once per phase, zero added delay
+_TW=$(tput cols 2>/dev/null || echo 64); [ "$_TW" -gt 76 ] && _TW=76; [ "$_TW" -lt 44 ] && _TW=44
+phase() {  # phase "Title" — one instant redraw of the single progress line
+    INSTALL_STEP=$(( INSTALL_STEP + 1 ))
+    local t="$1" pct bw fl em el i fill="" track=""
+    pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
+    bw=$(( _TW - 40 )); [ "$bw" -lt 12 ] && bw=12
+    fl=$(( bw * pct / 100 )); em=$(( bw - fl )); el=$(( SECONDS - INSTALL_T0 ))
+    i=0; while [ "$i" -lt "$fl" ]; do fill="${fill}█"; i=$(( i + 1 )); done
+    i=0; while [ "$i" -lt "$em" ]; do track="${track}░"; i=$(( i + 1 )); done
+    printf "\r\033[K ${GRY}[${BWHITE}%2d${GRY}/%d]${NC} ${SKY}◆${NC} ${BWHITE}%-16.16s${NC} ${TEAL}%s${GRY}%s${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$t" "$fill" "$track" "$pct" "$el"
     if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
 }
 
