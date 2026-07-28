@@ -8,8 +8,8 @@
 #   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (SSL payload)
 #   447  — SSL/TLS  (stunnel) -> OpenSSH direct
 #   22   — OpenSSH  (management / direct)
-#   109  — OpenSSH  (direct)
-#   143  — OpenSSH  (direct alt)
+#   109  — Dropbear (direct)
+#   143  — Dropbear (direct alt)
 #
 # The port-80 proxy is DUAL MODE:
 #   * If the client sends an HTTP/WebSocket payload, it replies
@@ -26,50 +26,34 @@ set -e
 
 BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
 BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
-BOLD='\033[1m'; DIM='\033[2m'; GRY='\033[0;90m'
-TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINKC='\033[38;5;213m'
-LIMEC='\033[38;5;190m'; ORNG='\033[38;5;208m'; BWHITE='\033[1;37m'
+# extended palette for the advanced installer UI
+BOLD='\033[1m'; DIM='\033[2m'
+TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; LIME='\033[38;5;155m'
+GRY='\033[38;5;240m'; BWHITE='\033[97m'; PINK='\033[38;5;213m'; ORANGE='\033[38;5;208m'
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 2>/dev/null || true
 
-# During the phased install, detail lines stay silent so the single
-# progress bar animates cleanly on one line. Warnings/errors still show.
-info()    { :; }
-success() { :; }
-warn()    { printf "\r\033[K"; echo -e "     ${BYellow}▲${NC} $*"; }
-error()   { printf "\r\033[K"; echo -e "     ${BRed}✘ $*${NC}"; exit 1; }
+# During the phased install, info/success are silenced so the single animated
+# progress bar stays on one clean line; warn/error still print (problems only).
+UI_SILENT=0
+info()    { [ "$UI_SILENT" = "1" ] && return 0; echo -e "${BCyan}[*] $*${NC}"; }
+success() { [ "$UI_SILENT" = "1" ] && return 0; echo -e "${BGreen}[✓] $*${NC}"; }
+warn()    { echo -e "${BYellow}[!] $*${NC}"; }
+error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
-# ── advanced installer progress system (single animated bar) ──
-INSTALL_STEP=0
-INSTALL_TOTAL=10
-PROG_PCT=0
-_spin_frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-_term_w() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 74 ] && c=74; [ "$c" -lt 40 ] && c=40; echo "$c"; }
-
-# _draw_progress <pct> <frame> <label> — redraws ONE line in place.
-_draw_progress() {
-    local pct="$1" frame="$2" label="$3" w barw filled empty i lbl
-    w=$(_term_w)
-    printf -v lbl "%-24.24s" "$label"
-    barw=$(( w - 40 )); [ "$barw" -lt 10 ] && barw=10
-    filled=$(( barw * pct / 100 )); empty=$(( barw - filled ))
-    printf "\r\033[K   ${TEAL}%s${NC} ${BWHITE}%s${NC} ${TEAL}" "$frame" "$lbl"
-    for ((i=0; i<filled; i++)); do printf "━"; done
-    printf "${GRY}"
-    for ((i=0; i<empty; i++)); do printf "─"; done
-    printf "${NC} ${TEAL}${BOLD}%3d%%${NC}" "$pct"
-}
-
-# phase "Title" — animates the single bar up to this step's target %.
-phase() {
-    INSTALL_STEP=$((INSTALL_STEP + 1))
-    local title="$1" target fi=0
-    target=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
-    while [ "$PROG_PCT" -lt "$target" ]; do
-        PROG_PCT=$((PROG_PCT + 1))
-        fi=$(( (fi + 1) % ${#_spin_frames} ))
-        _draw_progress "$PROG_PCT" "${_spin_frames:$fi:1}" "$title"
-        sleep 0.015
-    done
-    _draw_progress "$PROG_PCT" "✔" "$title"
+# ── advanced installer progress HUD (single animated gradient bar) ──
+INSTALL_TOTAL=12; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
+# simple, fast progress bar — drawn once per phase, zero added delay
+_TW=$(tput cols 2>/dev/null || echo 64); [ "$_TW" -gt 76 ] && _TW=76; [ "$_TW" -lt 44 ] && _TW=44
+phase() {  # phase "Title" — one instant redraw of the single progress line
+    INSTALL_STEP=$(( INSTALL_STEP + 1 ))
+    local t="$1" pct bw fl em el i fill="" track=""
+    pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
+    bw=$(( _TW - 40 )); [ "$bw" -lt 12 ] && bw=12
+    fl=$(( bw * pct / 100 )); em=$(( bw - fl )); el=$(( SECONDS - INSTALL_T0 ))
+    i=0; while [ "$i" -lt "$fl" ]; do fill="${fill}█"; i=$(( i + 1 )); done
+    i=0; while [ "$i" -lt "$em" ]; do track="${track}░"; i=$(( i + 1 )); done
+    printf "\r\033[K ${GRY}[${BWHITE}%2d${GRY}/%d]${NC} ${SKY}◆${NC} ${BWHITE}%-16.16s${NC} ${TEAL}%s${GRY}%s${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$t" "$fill" "$track" "$pct" "$el"
     if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
 }
 
@@ -83,45 +67,75 @@ STUNNEL_CERT=/etc/stunnel/stunnel.pem
 # ASK FOR DOMAIN
 # ═══════════════════════════════════════════
 clear
-# ── framed header ──────────────────────────────────────
-BOX_W=58
-_bx_top()  { printf "${BCyan}╭%s╮${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
-_bx_bot()  { printf "${BCyan}╰%s╯${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
-_bx_mid()  { printf "${BCyan}├%s┤${NC}\n" "$(printf '─%.0s' $(seq 1 $BOX_W))"; }
-_bx_row()  {  # centered plain text (no ansi inside)
-    local t="$1" len l r; len=${#t}
-    l=$(( (BOX_W - len) / 2 )); r=$(( BOX_W - len - l ))
-    (( l < 0 )) && l=0; (( r < 0 )) && r=0
-    printf "${BCyan}│${NC}%*s${BYellow}%s${NC}%*s${BCyan}│${NC}\n" "$l" "" "$t" "$r" ""
-}
+printf '\033[?25l'   # hide cursor for the intro animation
+# gradient ASCII banner, revealed line-by-line
+_banner=(
+"    ███████╗███████╗██╗  ██╗    ██╗   ██╗██████╗ ███╗   ██╗"
+"    ██╔════╝██╔════╝██║  ██║    ██║   ██║██╔══██╗████╗  ██║"
+"    ███████╗███████╗███████║    ██║   ██║██████╔╝██╔██╗ ██║"
+"    ╚════██║╚════██║██╔══██║    ╚██╗ ██╔╝██╔═══╝ ██║╚██╗██║"
+"    ███████║███████║██║  ██║     ╚████╔╝ ██║     ██║ ╚████║"
+"    ╚══════╝╚══════╝╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝  ╚═══╝"
+)
+_grad=('\033[38;5;201m' '\033[38;5;165m' '\033[38;5;39m' '\033[38;5;51m' '\033[38;5;46m' '\033[38;5;226m')
+echo ""
+for i in "${!_banner[@]}"; do
+    echo -e "  ${_grad[$i]}${BOLD}${_banner[$i]}${NC}"
+    sleep 0.05
+done
+echo -e "         ${GRY}ws${NC} ${DIM}·${NC} ${GRY}ssl${NC} ${DIM}·${NC} ${GRY}openssh${NC} ${DIM}·${NC} ${GRY}dropbear${NC} ${DIM}·${NC} ${GRY}v2ray${NC}   ${BWHITE}${BOLD}server installer${NC}"
+echo ""
+printf '\033[?25h'   # restore cursor for the prompt
+
+# ── styled domain prompt ──
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${TEAL}│${NC}  ${BWHITE}${BOLD}DOMAIN SETUP${NC}                                        ${TEAL}│${NC}"
+echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}Enter a domain pointed at this server, or leave${NC}     ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}blank to use a self-signed certificate (connect${NC}     ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}by IP).${NC}                                              ${TEAL}│${NC}"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
+DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
+
+# ── SlowDNS (DNSTT) nameserver prompt ──
+echo ""
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${TEAL}│${NC}  ${BWHITE}${BOLD}SLOWDNS SETUP${NC} ${GRY}(optional)${NC}                             ${TEAL}│${NC}"
+echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}Enter the NS host delegated to this server's IP${NC}     ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}(e.g. dns.example.com). Requires an NS + A record${NC}   ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}at your DNS host. Leave blank to skip SlowDNS.${NC}      ${TEAL}│${NC}"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}NS domain${NC} ${GRY}(blank = skip)${NC} : ")" NS_DOMAIN
+NS_DOMAIN="$(echo "$NS_DOMAIN" | tr -d '[:space:]')"
 
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-
-echo ""
-echo -e "   ${TEAL}${BOLD}███████╗███████╗██╗  ██╗   ${SKY}██╗   ██╗██████╗ ███╗   ██╗${NC}"
-echo -e "   ${TEAL}${BOLD}██╔════╝██╔════╝██║  ██║   ${SKY}██║   ██║██╔══██╗████╗  ██║${NC}"
-echo -e "   ${TEAL}${BOLD}███████╗███████╗███████║   ${SKY}██║   ██║██████╔╝██╔██╗ ██║${NC}"
-echo -e "   ${TEAL}${BOLD}╚════██║╚════██║██╔══██║   ${SKY}╚██╗ ██╔╝██╔═══╝ ██║╚██╗██║${NC}"
-echo -e "   ${TEAL}${BOLD}███████║███████║██║  ██║    ${SKY}╚████╔╝ ██║     ██║ ╚████║${NC}"
-echo -e "   ${TEAL}${BOLD}╚══════╝╚══════╝╚═╝  ╚═╝     ${SKY}╚═══╝  ╚═╝     ╚═╝  ╚═══╝${NC}"
-echo -e "        ${GRY}ws · ssl · openssh · v2ray  —  server installer${NC}"
-echo ""
-echo -e "   ${GRY}┌───────────────────────────────────────────────────┐${NC}"
-echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} Server IP  ${BWHITE}${BOLD}${SERVER_IP}${NC}"
-echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} SSL mode   ${BWHITE}self-signed${NC} ${GRY}(no domain needed)${NC}"
-echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} Steps      ${BWHITE}${INSTALL_TOTAL}${NC} ${GRY}phases${NC}"
-echo -e "   ${GRY}└───────────────────────────────────────────────────┘${NC}"
-echo ""
-sleep 1
-
-# No domain — always use a self-signed certificate. Connect using the IP.
-DOMAINS=()
-DOMAIN=""
-: > "$CONF_DIR/domains.conf"
-echo ""          > "$CONF_DIR/domain.conf"
+echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
-sleep 1
+echo "$NS_DOMAIN" > "$CONF_DIR/nsdomain.conf"
+
+# ── system info panel ──
+_OS=$( (. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME") || echo "Linux" )
+echo ""
+echo -e "  ${GRY}┌─ ${BWHITE}${BOLD}SYSTEM${NC} ${GRY}────────────────────────────────────────────┐${NC}"
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Server IP" "$SERVER_IP"
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "OS" "$_OS"
+if [ -n "$DOMAIN" ]; then
+    printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${LIME}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "domain: $DOMAIN"
+else
+    printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "self-signed (connect by IP)"
+fi
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Steps" "$INSTALL_TOTAL install phases"
+echo -e "  ${GRY}└──────────────────────────────────────────────────────┘${NC}"
+echo ""
+echo -e "  ${TEAL}${BOLD}▸ Installing — sit tight${NC}${GRY}, this runs itself.${NC}"
+echo ""
+sleep 0.4
+UI_SILENT=1   # from here on, the single progress bar is the only output
 
 # ─── Package manager setup ───────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
@@ -138,16 +152,13 @@ APT="apt-get install -y \
     -o Dpkg::Options::='--force-confdef' \
     -o Dpkg::Options::='--force-confold'"
 
-phase "Preparing system & package sources"
-info "Updating package list..."
+phase "System packages"
 apt-get update -y </dev/null >/dev/null 2>&1
-success "System ready"
 
 # ═══════════════════════════════════════════
 # SECTION 1 — OPENSSH
 # ═══════════════════════════════════════════
-phase "Installing & configuring OpenSSH"
-info "Installing & configuring OpenSSH..."
+phase "OpenSSH server"
 eval "$APT openssh-server curl" </dev/null >/dev/null 2>&1
 
 SSHD_CONF=/etc/ssh/sshd_config
@@ -163,10 +174,6 @@ apply_sshd_setting() {
 }
 
 apply_sshd_setting "Port"                    "22"
-# OpenSSH also listens on the former Dropbear direct ports so those endpoints keep working.
-for XP in 109 143; do
-    grep -qxF "Port ${XP}" "$SSHD_CONF" || echo "Port ${XP}" >> "$SSHD_CONF"
-done
 apply_sshd_setting "PermitRootLogin"         "yes"
 apply_sshd_setting "PasswordAuthentication"  "yes"
 apply_sshd_setting "AllowTcpForwarding"      "yes"
@@ -181,21 +188,120 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 success "OpenSSH configured on port 22"
 
 # ═══════════════════════════════════════════
-# SECTION 2 — TUNNEL-ONLY SHELLS
+# SECTION 2 — DROPBEAR (direct SSH targets)
 # ═══════════════════════════════════════════
-# OpenSSH accepts tunnel-only accounts whose shell is /bin/false.
+phase "Dropbear SSH"
+eval "$APT dropbear" </dev/null >/dev/null 2>&1
+
+mkdir -p /etc/dropbear
+for TYPE in dss rsa ecdsa ed25519; do
+    KEYFILE="/etc/dropbear/dropbear_${TYPE}_host_key"
+    [ -f "$KEYFILE" ] || dropbearkey -t "$TYPE" -f "$KEYFILE" >/dev/null 2>&1 || true
+done
+
+# Dropbear (and OpenSSH) accept tunnel-only accounts whose shell is /bin/false.
 grep -qxF '/bin/false' /etc/shells || echo '/bin/false' >> /etc/shells
 grep -qxF '/usr/sbin/nologin' /etc/shells || echo '/usr/sbin/nologin' >> /etc/shells
 
-# Remove Dropbear if a previous install left it behind — OpenSSH now serves all ports.
-systemctl disable --now dropbear >/dev/null 2>&1 || true
-success "OpenSSH now serves direct ports 22, 109 and 143"
+cat > /etc/default/dropbear <<'EOF'
+NO_START=0
+DROPBEAR_PORT=109
+DROPBEAR_EXTRA_ARGS="-p 143 -I 300 -K 30"
+DROPBEAR_BANNER=""
+DROPBEAR_RECEIVE_WINDOW=65536
+EOF
+
+systemctl enable dropbear >/dev/null 2>&1 || true
+systemctl restart dropbear
+success "Dropbear running on ports 109 and 143"
+
+# ═══════════════════════════════════════════
+# SECTION 2b — SLOWDNS (DNSTT) over UDP 53
+# ═══════════════════════════════════════════
+phase "SlowDNS (DNSTT)"
+NS_DOMAIN=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+if [ -n "$NS_DOMAIN" ]; then
+    systemctl stop slowdns >/dev/null 2>&1 || true
+    killall dnstt-server >/dev/null 2>&1 || true
+
+    # --- Free UDP 53: systemd-resolved usually holds it and silently kills
+    #     dnstt. Disable its stub listener but keep name resolution working.
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
+        rm -f /etc/resolv.conf 2>/dev/null || true
+        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        systemctl restart systemd-resolved >/dev/null 2>&1 || true
+    fi
+    # Anything else squatting on :53 (e.g. dnsmasq) — stop it.
+    fuser -k 53/udp >/dev/null 2>&1 || true
+
+    # --- Toolchain: prefer distro golang; fall back to snap. ---
+    eval "$APT git golang-go" </dev/null >/dev/null 2>&1
+    GO_BIN="$(command -v go || true)"
+    if [ -z "$GO_BIN" ]; then
+        eval "$APT snapd" </dev/null >/dev/null 2>&1
+        systemctl enable --now snapd.socket >/dev/null 2>&1 || true
+        [ -L /snap ] || ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true
+        sleep 2
+        snap install go --classic >/dev/null 2>&1 || true
+        GO_BIN=/snap/bin/go
+    fi
+
+    # --- Build dnstt-server if we don't already have the binary. ---
+    if [ ! -x /usr/local/bin/dnstt-server ] && [ -x "$GO_BIN" ]; then
+        cd /root; rm -rf dnstt
+        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+        if [ -d dnstt/dnstt-server ]; then
+            ( cd dnstt/dnstt-server && "$GO_BIN" build >/dev/null 2>&1 \
+              && mv -f dnstt-server /usr/local/bin/dnstt-server \
+              && chmod +x /usr/local/bin/dnstt-server )
+        fi
+    fi
+
+    if [ -x /usr/local/bin/dnstt-server ]; then
+        mkdir -p /etc/slowdns
+        if [ ! -f /etc/slowdns/server.key ]; then
+            /usr/local/bin/dnstt-server -gen-key \
+                -privkey-file /etc/slowdns/server.key \
+                -pubkey-file /etc/slowdns/server.pub >/dev/null 2>&1
+        fi
+        cp -f /etc/slowdns/server.pub "$CONF_DIR/slowdns_pub.txt" 2>/dev/null || true
+
+        cat > /etc/systemd/system/slowdns.service <<EOF
+[Unit]
+Description=SlowDNS Tunnel Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable slowdns >/dev/null 2>&1 || true
+        systemctl restart slowdns >/dev/null 2>&1 || true
+        sleep 1
+        if systemctl is-active --quiet slowdns 2>/dev/null; then
+            success "SlowDNS running on UDP 53 (NS: $NS_DOMAIN)"
+        else
+            warn "SlowDNS installed but not active — check 'journalctl -u slowdns' (port 53 in use?)"
+        fi
+    else
+        warn "SlowDNS skipped — Go toolchain unavailable, could not build dnstt-server"
+    fi
+else
+    info "SlowDNS skipped — no NS domain provided"
+fi
 
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
 # ═══════════════════════════════════════════
-phase "Building WebSocket / SSH proxy (port 80)"
-info "Building high-performance Go WebSocket/SSH proxy (port 80)..."
+phase "WebSocket proxy"
 
 # Remove any leftover Python proxy from a previous install.
 rm -f /usr/local/bin/ws-proxy.py 2>/dev/null || true
@@ -221,7 +327,7 @@ cat > "$BUILD_DIR/main.go" <<'GOEOF'
 //   * If nothing arrives quickly, it assumes a direct SSH client waiting
 //     for the banner and tunnels straight through.
 //
-// Backend SSH = OpenSSH on 127.0.0.1:22.
+// Backend SSH = Dropbear on 127.0.0.1:109.
 package main
 
 import (
@@ -234,7 +340,7 @@ import (
 
 const (
 	listenAddr  = "0.0.0.0:80"
-	backendAddr = "127.0.0.1:22"
+	backendAddr = "127.0.0.1:109"
 	peekTimeout = 3 * time.Second
 )
 
@@ -342,7 +448,7 @@ else
     cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
 import socket, threading
-BACKEND=('127.0.0.1',22); LISTEN=('0.0.0.0',80); T=3
+BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=3
 RESP=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 def pipe(s,d):
     try:
@@ -412,8 +518,8 @@ fi
 
 cat > /etc/systemd/system/ws-proxy.service <<EOF
 [Unit]
-Description=Dual-mode WebSocket/SSH proxy (port 80 -> OpenSSH 22)
-After=network.target ssh.service
+Description=Dual-mode WebSocket/SSH proxy (port 80 -> Dropbear 109)
+After=network.target dropbear.service
 
 [Service]
 Type=simple
@@ -435,8 +541,7 @@ success "WebSocket/SSH proxy installed (port 80)"
 # ═══════════════════════════════════════════
 # SECTION 4 — SSL CERTIFICATE
 # ═══════════════════════════════════════════
-phase "Generating SSL certificate"
-info "Setting up SSL certificate..."
+phase "SSL certificate"
 eval "$APT stunnel4 openssl" </dev/null >/dev/null 2>&1
 mkdir -p /etc/stunnel
 
@@ -445,8 +550,23 @@ systemctl stop ws-proxy 2>/dev/null || true
 systemctl stop nginx 2>/dev/null || true
 systemctl stop apache2 2>/dev/null || true
 
-# Always use a self-signed certificate (no domain required).
-ALL_DOMAINS=()
+if [ -n "$DOMAIN" ]; then
+    info "Requesting Let's Encrypt certificate for $DOMAIN ..."
+    eval "$APT certbot" </dev/null >/dev/null 2>&1 || true
+    certbot certonly --standalone -d "$DOMAIN" \
+        --non-interactive --agree-tos \
+        --register-unsafely-without-email >/dev/null 2>&1 && LE_OK=1 || LE_OK=0
+
+    if [ "${LE_OK:-0}" -eq 1 ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+        chmod -R 755 /etc/letsencrypt/archive /etc/letsencrypt/live
+        cat "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" \
+            "/etc/letsencrypt/live/$DOMAIN/privkey.pem" > "$STUNNEL_CERT"
+        success "Let's Encrypt certificate obtained for $DOMAIN"
+    else
+        warn "Let's Encrypt failed — using self-signed certificate"
+        DOMAIN=""
+    fi
+fi
 
 if [ -z "$DOMAIN" ] || [ ! -f "$STUNNEL_CERT" ]; then
     warn "Generating self-signed certificate..."
@@ -467,8 +587,7 @@ systemctl start ws-proxy >/dev/null 2>&1 || true
 #   443 -> WebSocket proxy (SSL + payload)
 #   447 -> OpenSSH direct  (plain SSL)
 # ═══════════════════════════════════════════
-phase "Configuring Stunnel (SSL/TLS on 443 & 447)"
-info "Configuring Stunnel (SSL on 443 & 447)..."
+phase "Stunnel TLS"
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || true
 
 cat > /etc/stunnel/stunnel.conf <<EOF
@@ -498,22 +617,21 @@ success "Stunnel running — SSL 443 (payload) & 447 (direct SSH)"
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
 # ═══════════════════════════════════════════
-phase "Configuring firewall"
-info "Opening firewall ports..."
+phase "Firewall rules"
 if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
+    ufw allow 53/udp >/dev/null 2>&1
     success "UFW rules applied"
 else
-    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447"
+    warn "ufw not found — open ports manually: TCP 22 80 109 143 443 447, UDP 53"
 fi
 
 # ═══════════════════════════════════════════
 # SECTION 6b — BANDWIDTH MONITOR (vnstat)
 # ═══════════════════════════════════════════
-phase "Installing bandwidth monitor"
-info "Installing bandwidth monitor (vnstat)..."
+phase "Bandwidth monitor"
 eval "$APT vnstat" </dev/null >/dev/null 2>&1 || true
 # Detect the primary network interface and register it with vnstat.
 PRIMARY_IFACE=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
@@ -530,8 +648,7 @@ success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
 #   These are installed but Xray itself stays OFF until activated in the menu.
 # ═══════════════════════════════════════════
-phase "Installing V2Ray helper scripts"
-info "Installing Xray helper scripts (config generator + limit checker)..."
+phase "Xray / V2Ray"
 
 # --- config generator: rebuilds Xray config from the accounts file --------
 cat > /usr/local/bin/xray-gen <<'XGEOF'
@@ -691,8 +808,7 @@ success "Xray helper scripts installed (quota + expiry enforcement ready)"
 # ═══════════════════════════════════════════
 # SECTION 7 — INSTALL THE 'menu' COMMAND
 # ═══════════════════════════════════════════
-phase "Installing management panel"
-info "Installing management panel (menu command)..."
+phase "Management panel"
 
 cat > /usr/local/bin/menu <<'MENUEOF'
 #!/bin/bash
@@ -810,7 +926,7 @@ banner() {
     echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
     echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
     echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
-    echo -e "        ${GR}ws · ssl · openssh manager${NC}"
+    echo -e "        ${GR}ws · ssl · dropbear · openssh manager${NC}"
     echo ""
 }
 
@@ -824,7 +940,7 @@ status_bar() {
     read -r _rx _tx _tot <<<"$(bw_alltime)"
     row "$col" "${GR}DATA${NC}    ${W}${BOLD}$(hb "$_tot")${NC} ${GR}used${NC}"
     local svcline="${GR}SVC${NC}    "
-    for s in ssh ws-proxy stunnel4; do
+    for s in ssh dropbear ws-proxy stunnel4 slowdns; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
         svcline+="${dot} ${s}   "
     done
@@ -840,7 +956,12 @@ show_ports() {
     row "$col" "${LIME}▸${NC} WebSocket (payload)  ${GR}→${NC} ${W}${HOST_DISPLAY}:80${NC}"
     row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443${NC}"
     row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
-    row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22 / 109 / 143${NC}"
+    row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
+    row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
+    local _ns; _ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    if [ -n "$_ns" ]; then
+        row "$col" "${LIME}▸${NC} SlowDNS (UDP 53)     ${GR}→${NC} ${W}${_ns}${NC}"
+    fi
     line_bot "$col"
 }
 
@@ -855,23 +976,6 @@ ok()   { echo -e "  ${G}✔${NC} $*"; }
 err()  { echo -e "  ${R}✘${NC} $*"; }
 note() { echo -e "  ${Y}➜${NC} $*"; }
 warn() { echo -e "  ${Y}⚠${NC} $*"; }
-
-# spin "message" command args...  — runs command while showing a loading animation.
-spin() {
-    local msg="$1"; shift
-    ( "$@" ) >/dev/null 2>&1 &
-    local pid=$! i=0 frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null
-    while kill -0 "$pid" 2>/dev/null; do
-        i=$(( (i + 1) % ${#frames} ))
-        printf "\r  ${C}%s${NC} %s" "${frames:$i:1}" "$msg"
-        sleep 0.1
-    done
-    wait "$pid"; local rc=$?
-    command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null
-    printf "\r\033[K"
-    return $rc
-}
 
 create_user() {
     section "CREATE SSH USER" "$LIME"
@@ -999,22 +1103,6 @@ change_password() {
     pause
 }
 
-change_root_password() {
-    section "CHANGE SERVER (ROOT) PASSWORD" "$R"
-    row "$R" "${Y}This changes the root/SSH login password for THIS server.${NC}"
-    echo ""
-    read -rp "$(echo -e "  ${C}New root password${NC} : ")" RPASS
-    [ -z "$RPASS" ] && { err "Password cannot be empty."; pause; return; }
-    read -rp "$(echo -e "  ${C}Confirm password${NC}  : ")" RPASS2
-    [ "$RPASS" != "$RPASS2" ] && { err "Passwords do not match."; pause; return; }
-    if echo -e "${RPASS}\n${RPASS}" | passwd root >/dev/null 2>&1; then
-        ok "Root password updated. Use it on your next SSH login."
-    else
-        err "Failed to change root password."
-    fi
-    pause
-}
-
 renew_user() {
     section "RENEW / EXTEND ACCOUNT" "$VIOLET"
     read -rp "$(echo -e "  ${C}Username${NC} : ")" USERNAME
@@ -1031,7 +1119,7 @@ renew_user() {
 
 service_status() {
     section "SERVICE STATUS" "$P"
-    local col="$P" svcs="ssh ws-proxy stunnel4"
+    local col="$P" svcs="ssh dropbear ws-proxy stunnel4 slowdns"
     [ -f /usr/local/bin/xray ] && svcs="$svcs xray"
     line_top "$col"
     for svc in $svcs; do
@@ -1050,9 +1138,39 @@ restart_services() {
     section "RESTART ALL SERVICES" "$ORANGE"
     note "Restarting services, please wait..."
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+    systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
     systemctl restart stunnel4 2>/dev/null
+    systemctl restart slowdns 2>/dev/null
     ok "All services restarted."
+    pause
+}
+
+slowdns_info() {
+    section "SLOWDNS INFO" "$TEAL"
+    local ns pub
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat "$CONF_DIR/slowdns_pub.txt" 2>/dev/null)
+    if [ -z "$ns" ] || [ -z "$pub" ]; then
+        err "SlowDNS is not configured on this server."
+        note "Re-run the installer and enter an NS domain to enable it."
+        pause; return
+    fi
+    if systemctl is-active --quiet slowdns 2>/dev/null; then
+        ok "Service: ${G}running${NC} (UDP 53)"
+    else
+        err "Service: ${R}stopped${NC}  — use option 10 to restart"
+    fi
+    echo ""
+    echo -e "  ${GR}NS domain${NC}"
+    echo -e "    ${W}${BOLD}${ns}${NC}"
+    echo ""
+    echo -e "  ${GR}Public key${NC}"
+    echo -e "    ${LIME}${pub}${NC}"
+    echo ""
+    echo -e "  ${GR}DNS resolver${NC}  ${W}1.1.1.1${NC}  ${GR}(or 8.8.8.8)${NC}"
+    echo ""
+    echo -e "  ${GR}Login${NC}  use any SSH user (option 1) — SlowDNS tunnels to SSH."
     pause
 }
 
@@ -1408,29 +1526,6 @@ xray_delete() {
     pause
 }
 
-_v2ray_up() { rebuild_config; systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; }
-
-enable_v2ray() {
-    xray_paths
-    section "ENABLE V2RAY" "$PINK"
-    if systemctl is-active --quiet xray 2>/dev/null; then
-        ok "V2Ray is already ${G}ACTIVE${NC}."
-        sleep 1; xray_menu; return
-    fi
-    if [ ! -f "$XBIN" ]; then
-        spin "Installing V2Ray-core (needs internet)..." xray_install || { err "Install failed — check the server's internet."; pause; return; }
-    fi
-    spin "Enabling & starting V2Ray..." _v2ray_up
-    sleep 1
-    if systemctl is-active --quiet xray 2>/dev/null; then
-        ok "V2Ray is now ${G}ACTIVE${NC}."
-    else
-        note "V2Ray installed & enabled — create an account to finish setup."
-    fi
-    sleep 1
-    xray_menu
-}
-
 xray_menu() {
     xray_paths
     while true; do
@@ -1485,9 +1580,9 @@ while true; do
     menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
     menu_item "7" "📊" "Service status"           "$C"
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
-    menu_item "9" "🌐" "Enable V2Ray"             "$PINK"
+    menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
-    menu_item "11" "🔐" "Change server password"  "$R"
+    menu_item "11" "🐌" "SlowDNS info / config"   "$TEAL"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1500,9 +1595,9 @@ while true; do
         6) renew_user ;;
         7) service_status ;;
         8) bandwidth ;;
-        9) enable_v2ray ;;
+        9) xray_menu ;;
         10) restart_services ;;
-        11) change_root_password ;;
+        11) slowdns_info ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
@@ -1515,12 +1610,11 @@ success "Management panel installed — type 'menu' to open it"
 # ═══════════════════════════════════════════
 # DEFAULT SSH USERS (auto-created)
 # ═══════════════════════════════════════════
-phase "Creating default SSH users"
-info "Creating default SSH users..."
+phase "Default users"
 DEFAULT_USER_PASS="0000"
 DEFAULT_USER_DAYS=30
 DEFAULT_USER_EXP=$(date -d "+${DEFAULT_USER_DAYS} days" +"%Y-%m-%d")
-for U in boew caen xeon haje pein; do
+for U in deon febo geto weon ceon; do
     if id "$U" >/dev/null 2>&1; then
         info "User '$U' already exists — skipped"
     else
@@ -1533,35 +1627,36 @@ done
 # ═══════════════════════════════════════════
 # FINAL MESSAGE
 # ═══════════════════════════════════════════
+UI_SILENT=0
+_ELAPSED=$(( SECONDS - INSTALL_T0 ))
 clear
 echo ""
-echo -e "   ${BGreen}${BOLD}  ✔  INSTALLATION COMPLETE${NC}"
-echo -e "   ${GRY}All protocols installed and running — server is ready.${NC}"
+echo -e "  ${LIME}${BOLD}  ✔  INSTALLATION COMPLETE${NC}   ${GRY}all protocols installed in ${BWHITE}${_ELAPSED}s${GRY}.${NC}"
 echo ""
-echo -e "   ${TEAL}"
-for ((i=0; i<52; i++)); do printf "━"; done
-echo -e "${NC}"
-echo -e "   ${SKY}◆${NC} Server IP  ${BWHITE}${BOLD}${SERVER_IP}${NC}"
-if [ "${#ALL_DOMAINS[@]}" -gt 0 ]; then
-    echo -e "   ${SKY}◆${NC} Domains    ${BWHITE}${ALL_DOMAINS[*]}${NC}"
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+printf  "  ${TEAL}│${NC}  ${SKY}◆${NC} %-13s ${BWHITE}${BOLD}%-33.33s${NC}${TEAL}│${NC}\n" "Host / Domain" "${DOMAIN:-$SERVER_IP}"
+echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}SERVICES & PORTS${NC} ${TEAL}──────────────────────────────────┤${NC}"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "WebSocket (payload)" "80"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL + payload (TLS)" "443"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL direct SSH (TLS)" "447"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "OpenSSH" "22"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "Dropbear" "109, 143"
+if [ -n "$NS_DOMAIN" ] && [ -x /usr/local/bin/dnstt-server ]; then
+    printf "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SlowDNS (UDP 53)" "$NS_DOMAIN"
+fi
+echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}DEFAULT USERS${NC} ${GRY}(pass: 0000, ${DEFAULT_USER_DAYS}d)${NC} ${TEAL}────────────────────┤${NC}"
+printf  "  ${TEAL}│${NC}   ${PINK}●${NC} %-50s${TEAL}│${NC}\n" "deon · febo · geto · weon · ceon"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+echo -e "  ${GRY}Client tips${NC}"
+echo -e "    ${DIM}WS payload${NC}  GET / HTTP/1.1[crlf]Host: ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}[crlf]Upgrade: websocket[crlf][crlf]"
+echo -e "    ${DIM}SSL/SNI${NC}     ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
+if [ -n "$NS_DOMAIN" ] && [ -f "$CONF_DIR/slowdns_pub.txt" ]; then
+    echo -e "    ${DIM}SlowDNS${NC}     NS ${BWHITE}${NS_DOMAIN}${NC}  ${GRY}pubkey:${NC}"
+    echo -e "                ${LIME}$(cat "$CONF_DIR/slowdns_pub.txt")${NC}"
 fi
 echo ""
-echo -e "   ${BWHITE}${BOLD}CONNECTION PORTS${NC}"
-echo -e "     ${LIMEC}▸${NC} WebSocket (payload)   ${GRY}→${NC} ${BWHITE}80${NC}"
-echo -e "     ${LIMEC}▸${NC} SSL + payload (TLS)   ${GRY}→${NC} ${BWHITE}443${NC}"
-echo -e "     ${LIMEC}▸${NC} SSL direct SSH (TLS)  ${GRY}→${NC} ${BWHITE}447${NC}"
-echo -e "     ${LIMEC}▸${NC} OpenSSH               ${GRY}→${NC} ${BWHITE}22, 109, 143${NC}"
-echo ""
-echo -e "   ${BWHITE}${BOLD}DEFAULT USERS${NC} ${GRY}(pass: 0000 · valid ${DEFAULT_USER_DAYS} days)${NC}"
-echo -e "     ${PINKC}boew${NC} · ${PINKC}caen${NC} · ${PINKC}xeon${NC} · ${PINKC}haje${NC} · ${PINKC}pein${NC}"
-echo ""
-echo -e "   ${BWHITE}${BOLD}CLIENT TIPS${NC}"
-echo -e "     ${GRY}Payload :${NC} GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
-echo -e "     ${GRY}SNI host:${NC} ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
-echo -e "   ${TEAL}"
-for ((i=0; i<52; i++)); do printf "━"; done
-echo -e "${NC}"
-echo -e "   ${BYellow}➜  Type ${BGreen}${BOLD}menu${NC}${BYellow} to open the control panel.${NC}"
+echo -e "  ${TEAL}${BOLD}▸${NC} Type ${LIME}${BOLD}menu${NC} to open the control panel and create users."
 echo ""
 
 # ═══════════════════════════════════════════

@@ -1,1 +1,2 @@
 - [myssh setup script conventions](myssh-script.md) — edit scripts/ssh-ssl-setup.sh, copy to root, bash -n main + menu heredoc, push replit-agent; 443 needs CAP_NET_BIND_SERVICE.
+- [SlowDNS UDP 53](slowdns-udp53.md) — dnstt silently fails unless port 53 is freed (disable systemd-resolved stub); verify is-active after start.
