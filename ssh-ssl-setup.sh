@@ -42,22 +42,34 @@ error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
 # ── advanced installer progress HUD (single animated gradient bar) ──
 INSTALL_TOTAL=11; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
-_frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+# rotating orb spinner + rainbow spectrum for the bar fill
+_frames='◐◓◑◒'
+_spec=(201 165 129 93 63 33 39 45 51 50 49 48 47 46 82 118 154 190 226 220 214 208 202 196)
+_shim=0   # moving shimmer position
 _termw() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 76 ] && c=76; [ "$c" -lt 44 ] && c=44; echo "$c"; }
-_bar() {  # _bar <pct> <frame> <label> — redraw ONE line in place
-    local pct="$1" fr="$2" lbl="$3" w bw fl em i el
+_bar() {  # _bar <pct> <frame> <label> — redraw ONE line in place, rainbow style
+    local pct="$1" fr="$2" lbl="$3" w bw fl em i el ns ci
     w=$(_termw); printf -v lbl "%-16.16s" "$lbl"; el=$(( SECONDS - INSTALL_T0 ))
     bw=$(( w - 44 )); [ "$bw" -lt 10 ] && bw=10
-    fl=$(( bw * pct / 100 )); em=$(( bw - fl ))
-    printf "\r\033[K ${GRY}[${BWHITE}%2d${GRY}/%d]${NC} ${TEAL}%s${NC} ${BWHITE}%s${NC} " "$INSTALL_STEP" "$INSTALL_TOTAL" "$fr" "$lbl"
-    i=0; while [ "$i" -lt "$fl" ]; do
-        if   [ $(( i * 3 )) -lt "$bw" ];       then printf "${TEAL}▰"
-        elif [ $(( i * 3 )) -lt $(( bw * 2 )) ]; then printf "${SKY}▰"
-        else printf "${BWHITE}▰"; fi
+    fl=$(( bw * pct / 100 )); em=$(( bw - fl )); ns=${#_spec[@]}
+    # step counter with a rotating color, orb spinner, label
+    ci=${_spec[$(( INSTALL_STEP % ns ))]}
+    printf "\r\033[K \033[38;5;%sm[${BOLD}%2d${NC}\033[38;5;%sm/%d]${NC} \033[38;5;51m${BOLD}%s${NC} ${BWHITE}%s${NC} ${GRY}▕${NC}" \
+        "$ci" "$INSTALL_STEP" "$ci" "$INSTALL_TOTAL" "$fr" "$lbl"
+    # rainbow filled cells; the shimmer cell flashes bright white
+    i=0
+    while [ "$i" -lt "$fl" ]; do
+        if [ "$i" = "$(( fl - 1 ))" ] || [ "$(( (i + _shim) % 7 ))" = "0" ]; then
+            printf "${BWHITE}█"
+        else
+            ci=${_spec[$(( i * ns / bw ))]}
+            printf "\033[38;5;%sm█" "$ci"
+        fi
         i=$(( i + 1 ))
     done
-    printf "${GRY}"; i=0; while [ "$i" -lt "$em" ]; do printf "▱"; i=$(( i + 1 )); done
-    printf "${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" "$pct" "$el"
+    printf "${GRY}"; i=0; while [ "$i" -lt "$em" ]; do printf "·"; i=$(( i + 1 )); done
+    printf "${NC}${GRY}▏${NC} \033[38;5;51m${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" "$pct" "$el"
+    _shim=$(( (_shim + 1) % 7 ))
 }
 phase() {  # phase "Title" — fill the single bar up to this step's target %
     INSTALL_STEP=$(( INSTALL_STEP + 1 )); local t="$1" tg fi=0
@@ -90,7 +102,7 @@ _banner=(
 "    ███████║███████║██║  ██║     ╚████╔╝ ██║     ██║ ╚████║"
 "    ╚══════╝╚══════╝╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝  ╚═══╝"
 )
-_grad=("$TEAL" "$TEAL" "$SKY" "$SKY" "$BCyan" "$BCyan")
+_grad=('\033[38;5;201m' '\033[38;5;165m' '\033[38;5;39m' '\033[38;5;51m' '\033[38;5;46m' '\033[38;5;226m')
 echo ""
 for i in "${!_banner[@]}"; do
     echo -e "  ${_grad[$i]}${BOLD}${_banner[$i]}${NC}"
