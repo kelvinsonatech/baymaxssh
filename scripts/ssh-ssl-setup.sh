@@ -1127,6 +1127,38 @@ restart_services() {
     pause
 }
 
+slowdns_info() {
+    section "SLOWDNS INFO" "$TEAL"
+    local ns pub
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat "$CONF_DIR/slowdns_pub.txt" 2>/dev/null)
+    if [ -z "$ns" ] || [ -z "$pub" ]; then
+        err "SlowDNS is not configured on this server."
+        note "Re-run the installer and enter an NS domain to enable it."
+        pause; return
+    fi
+    if systemctl is-active --quiet slowdns 2>/dev/null; then
+        ok "Service: ${G}running${NC} (UDP 53)"
+    else
+        err "Service: ${R}stopped${NC}  — use option 10 to restart"
+    fi
+    echo ""
+    echo -e "  ${GR}NS domain${NC}"
+    echo -e "    ${W}${BOLD}${ns}${NC}"
+    echo ""
+    echo -e "  ${GR}Public key${NC}"
+    echo -e "    ${LIME}${pub}${NC}"
+    echo ""
+    echo -e "  ${GR}DNS resolver${NC}  ${W}1.1.1.1${NC}  ${GR}(or 8.8.8.8)${NC}"
+    echo ""
+    echo -e "  ${GR}Termux / client command${NC}"
+    echo -e "    ${DIM}curl -sO https://github.com/khaledagn/DNS-AGN/raw/main/files/slowdns \\
+      && chmod +x slowdns && ./slowdns ${ns} ${pub}${NC}"
+    echo ""
+    echo -e "  ${GR}Login${NC}  use any SSH user (e.g. from option 1) — SlowDNS tunnels to SSH."
+    pause
+}
+
 # ═══════════════════════════════════════════
 # XRAY / V2RAY (VMESS) — menu-activated, not auto-started
 # ═══════════════════════════════════════════
@@ -1535,6 +1567,7 @@ while true; do
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
+    menu_item "11" "🐌" "SlowDNS info / config"   "$TEAL"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1549,6 +1582,7 @@ while true; do
         8) bandwidth ;;
         9) xray_menu ;;
         10) restart_services ;;
+        11) slowdns_info ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
