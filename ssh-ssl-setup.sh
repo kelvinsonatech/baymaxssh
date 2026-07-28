@@ -41,33 +41,43 @@ error()   { printf "\r\033[K"; echo -e "     ${BRed}✘ $*${NC}"; exit 1; }
 INSTALL_STEP=0
 INSTALL_TOTAL=10
 PROG_PCT=0
+INSTALL_T0=$SECONDS
 _spin_frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 _term_w() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 74 ] && c=74; [ "$c" -lt 40 ] && c=40; echo "$c"; }
 
 # _draw_progress <pct> <frame> <label> — redraws ONE line in place.
+# Advanced HUD: [step/total] spinner label gradient-bar pct elapsed
 _draw_progress() {
-    local pct="$1" frame="$2" label="$3" w barw filled empty i lbl
+    local pct="$1" frame="$2" label="$3" w barw filled empty i lbl el
     w=$(_term_w)
-    printf -v lbl "%-24.24s" "$label"
-    barw=$(( w - 40 )); [ "$barw" -lt 10 ] && barw=10
+    printf -v lbl "%-18.18s" "$label"
+    el=$(( SECONDS - INSTALL_T0 ))
+    barw=$(( w - 42 )); [ "$barw" -lt 10 ] && barw=10
     filled=$(( barw * pct / 100 )); empty=$(( barw - filled ))
-    printf "\r\033[K   ${TEAL}%s${NC} ${BWHITE}%s${NC} ${TEAL}" "$frame" "$lbl"
-    for ((i=0; i<filled; i++)); do printf "━"; done
+    printf "\r\033[K ${GRY}[${NC}${BWHITE}%2d${NC}${GRY}/%d]${NC} ${TEAL}%s${NC} ${BWHITE}%s${NC} " \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$frame" "$lbl"
+    # gradient fill: teal -> sky -> white hot tip
+    for ((i=0; i<filled; i++)); do
+        if   (( i * 3 <  barw     )); then printf "${TEAL}━"
+        elif (( i * 3 <  barw * 2 )); then printf "${SKY}━"
+        else printf "${BWHITE}━"; fi
+    done
     printf "${GRY}"
     for ((i=0; i<empty; i++)); do printf "─"; done
-    printf "${NC} ${TEAL}${BOLD}%3d%%${NC}" "$pct"
+    printf "${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" "$pct" "$el"
 }
 
-# phase "Title" — animates the single bar up to this step's target %.
+# phase "Title" — fast-animates the single bar up to this step's target %.
 phase() {
     INSTALL_STEP=$((INSTALL_STEP + 1))
     local title="$1" target fi=0
     target=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
     while [ "$PROG_PCT" -lt "$target" ]; do
-        PROG_PCT=$((PROG_PCT + 1))
+        PROG_PCT=$((PROG_PCT + 2))
+        if [ "$PROG_PCT" -gt "$target" ]; then PROG_PCT=$target; fi
         fi=$(( (fi + 1) % ${#_spin_frames} ))
         _draw_progress "$PROG_PCT" "${_spin_frames:$fi:1}" "$title"
-        sleep 0.015
+        sleep 0.008
     done
     _draw_progress "$PROG_PCT" "✔" "$title"
     if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
@@ -113,7 +123,7 @@ echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} SSL mode   ${BWHITE}self-signed${NC} 
 echo -e "   ${GRY}│${NC}  ${SKY}◆${NC} Steps      ${BWHITE}${INSTALL_TOTAL}${NC} ${GRY}phases${NC}"
 echo -e "   ${GRY}└───────────────────────────────────────────────────┘${NC}"
 echo ""
-sleep 1
+sleep 0.4
 
 # No domain — always use a self-signed certificate. Connect using the IP.
 DOMAINS=()
