@@ -1433,8 +1433,19 @@ v2ray_enabled() {
 
 enable_v2ray() {
     xray_paths
-    # Already enabled -> go straight to the management menu.
-    if v2ray_enabled; then xray_menu; return; fi
+    # Already enabled -> auto-repair if it's dead, then go to the management menu.
+    if v2ray_enabled; then
+        if ! systemctl is-active --quiet xray 2>/dev/null; then
+            spin "V2Ray stopped — rebuilding config & restarting..." _v2ray_up
+            sleep 1
+            if ! systemctl is-active --quiet xray 2>/dev/null; then
+                err "V2Ray failed to start. Last errors:"
+                journalctl -u xray -n 8 --no-pager 2>/dev/null | tail -4 | sed 's/^/    /'
+                pause
+            fi
+        fi
+        xray_menu; return
+    fi
 
     section "ENABLE V2RAY" "$PINK"
     row "$PINK" "${GR}Enter a domain for V2Ray TLS/SNI, or leave blank to use the server IP.${NC}"
@@ -1495,7 +1506,7 @@ xray_menu() {
             1) xray_activate ;;
             2) xray_list ;;
             3) xray_delete ;;
-            4) systemctl enable xray >/dev/null 2>&1; systemctl start xray >/dev/null 2>&1; ok "Xray started."; sleep 1 ;;
+            4) spin "Rebuilding config & starting Xray..." _v2ray_up; if systemctl is-active --quiet xray 2>/dev/null; then ok "Xray started."; else err "Xray failed to start:"; journalctl -u xray -n 6 --no-pager 2>/dev/null | tail -3 | sed 's/^/    /'; fi; sleep 1 ;;
             5) systemctl stop xray >/dev/null 2>&1; ok "Xray stopped."; sleep 1 ;;
             6) xray_443 ;;
             0) break ;;
