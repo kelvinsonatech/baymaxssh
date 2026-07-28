@@ -562,6 +562,7 @@ if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; the
 else
     [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
         -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
+    chmod 644 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
     CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
 fi
 
@@ -1090,6 +1091,7 @@ xray_paths() {
     else
         [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
             -subj "/CN=${XHOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
+        chmod 644 /etc/xray/xray.crt /etc/xray/xray.key 2>/dev/null || true
         XR_CERT=/etc/xray/xray.crt; XR_KEY=/etc/xray/xray.key
     fi
     # Mirror the 443 handover so displayed links use the right port.
