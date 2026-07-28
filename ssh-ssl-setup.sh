@@ -240,44 +240,43 @@ if [ -n "$NS_DOMAIN" ]; then
     # Anything else squatting on :53 (e.g. dnsmasq) — stop it.
     fuser -k 53/udp >/dev/null 2>&1
 
-    # --- 1) Try a prebuilt dnstt-server binary first (fast, no compiler). ---
-    if [ ! -x /usr/local/bin/dnstt-server ]; then
-        for URL in \
-            "https://github.com/khaledagn/DNS-AGN/raw/main/files/dnstt-server" \
-            "https://raw.githubusercontent.com/khaledagn/DNS-AGN/main/files/dnstt-server"; do
-            curl -fsSL --connect-timeout 15 -o /usr/local/bin/dnstt-server "$URL" >/dev/null 2>&1
-            if [ -s /usr/local/bin/dnstt-server ]; then
-                chmod +x /usr/local/bin/dnstt-server
-                # Sanity-check it actually runs on this arch.
-                if /usr/local/bin/dnstt-server -help >/dev/null 2>&1 \
-                   || /usr/local/bin/dnstt-server 2>&1 | grep -qi 'usage\|dnstt\|privkey'; then
-                    break
-                fi
-                rm -f /usr/local/bin/dnstt-server
-            fi
-        done
+    eval "$APT git curl ca-certificates" </dev/null >/dev/null 2>&1
+
+    # --- Ensure a modern Go (>=1.20). Ubuntu's apt Go is too old to build
+    #     current dnstt, and snap is unreliable, so pull the official tarball. ---
+    _go_ok() { command -v "$1" >/dev/null 2>&1 && "$1" version 2>/dev/null \
+                 | grep -qE 'go1\.(2[0-9]|[3-9][0-9])'; }
+    GO_BIN=""
+    for c in /usr/local/go/bin/go go /snap/bin/go; do
+        _go_ok "$c" && { GO_BIN="$c"; break; }
+    done
+    if [ -z "$GO_BIN" ]; then
+        ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+        case "$ARCH" in
+            amd64|x86_64)  GOA=amd64;;
+            arm64|aarch64) GOA=arm64;;
+            armhf|armv7l)  GOA=armv6l;;
+            *)             GOA=amd64;;
+        esac
+        GOVER=go1.22.5
+        if curl -fsSL --connect-timeout 25 -o /tmp/go.tgz \
+             "https://go.dev/dl/${GOVER}.linux-${GOA}.tar.gz" >/dev/null 2>&1; then
+            rm -rf /usr/local/go
+            tar -C /usr/local -xzf /tmp/go.tgz >/dev/null 2>&1
+            rm -f /tmp/go.tgz
+            _go_ok /usr/local/go/bin/go && GO_BIN=/usr/local/go/bin/go
+        fi
     fi
 
-    # --- 2) Fallback: build from source if no working binary yet. ---
-    if [ ! -x /usr/local/bin/dnstt-server ]; then
-        eval "$APT git golang-go" </dev/null >/dev/null 2>&1
-        GO_BIN="$(command -v go || true)"
-        if [ -z "$GO_BIN" ]; then
-            eval "$APT snapd" </dev/null >/dev/null 2>&1
-            systemctl enable --now snapd.socket >/dev/null 2>&1
-            [ -L /snap ] || ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1
-            sleep 2
-            snap install go --classic >/dev/null 2>&1
-            GO_BIN=/snap/bin/go
-        fi
-        if [ -x "$GO_BIN" ]; then
-            cd /root; rm -rf dnstt
-            git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
-            if [ -d dnstt/dnstt-server ]; then
-                ( cd dnstt/dnstt-server && "$GO_BIN" build >/dev/null 2>&1 \
-                  && mv -f dnstt-server /usr/local/bin/dnstt-server \
-                  && chmod +x /usr/local/bin/dnstt-server )
-            fi
+    # --- Build dnstt-server from the canonical source. ---
+    if [ ! -x /usr/local/bin/dnstt-server ] && [ -n "$GO_BIN" ]; then
+        cd /root; rm -rf dnstt
+        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+        if [ -d dnstt/dnstt-server ]; then
+            ( cd dnstt/dnstt-server \
+              && export HOME=/root GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOFLAGS=-mod=mod \
+              && "$GO_BIN" build -o dnstt-server >/dev/null 2>&1 \
+              && install -m 0755 dnstt-server /usr/local/bin/dnstt-server )
         fi
     fi
 
