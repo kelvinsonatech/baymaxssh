@@ -26,11 +26,49 @@ set -e
 
 BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
 BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
+# extended palette for the advanced installer UI
+BOLD='\033[1m'; DIM='\033[2m'
+TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; LIME='\033[38;5;155m'
+GRY='\033[38;5;240m'; BWHITE='\033[97m'; PINK='\033[38;5;213m'; ORANGE='\033[38;5;208m'
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 2>/dev/null || true
 
-info()    { echo -e "${BCyan}[*] $*${NC}"; }
-success() { echo -e "${BGreen}[✓] $*${NC}"; }
+# During the phased install, info/success are silenced so the single animated
+# progress bar stays on one clean line; warn/error still print (problems only).
+UI_SILENT=0
+info()    { [ "$UI_SILENT" = "1" ] && return 0; echo -e "${BCyan}[*] $*${NC}"; }
+success() { [ "$UI_SILENT" = "1" ] && return 0; echo -e "${BGreen}[✓] $*${NC}"; }
 warn()    { echo -e "${BYellow}[!] $*${NC}"; }
 error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
+
+# ── advanced installer progress HUD (single animated gradient bar) ──
+INSTALL_TOTAL=11; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
+_frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+_termw() { local c; c=$(tput cols 2>/dev/null || echo 64); [ "$c" -gt 76 ] && c=76; [ "$c" -lt 44 ] && c=44; echo "$c"; }
+_bar() {  # _bar <pct> <frame> <label> — redraw ONE line in place
+    local pct="$1" fr="$2" lbl="$3" w bw fl em i el
+    w=$(_termw); printf -v lbl "%-16.16s" "$lbl"; el=$(( SECONDS - INSTALL_T0 ))
+    bw=$(( w - 44 )); [ "$bw" -lt 10 ] && bw=10
+    fl=$(( bw * pct / 100 )); em=$(( bw - fl ))
+    printf "\r\033[K ${GRY}[${BWHITE}%2d${GRY}/%d]${NC} ${TEAL}%s${NC} ${BWHITE}%s${NC} " "$INSTALL_STEP" "$INSTALL_TOTAL" "$fr" "$lbl"
+    i=0; while [ "$i" -lt "$fl" ]; do
+        if   [ $(( i * 3 )) -lt "$bw" ];       then printf "${TEAL}▰"
+        elif [ $(( i * 3 )) -lt $(( bw * 2 )) ]; then printf "${SKY}▰"
+        else printf "${BWHITE}▰"; fi
+        i=$(( i + 1 ))
+    done
+    printf "${GRY}"; i=0; while [ "$i" -lt "$em" ]; do printf "▱"; i=$(( i + 1 )); done
+    printf "${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" "$pct" "$el"
+}
+phase() {  # phase "Title" — fill the single bar up to this step's target %
+    INSTALL_STEP=$(( INSTALL_STEP + 1 )); local t="$1" tg fi=0
+    tg=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
+    while [ "$PROG_PCT" -lt "$tg" ]; do
+        PROG_PCT=$(( PROG_PCT + 2 )); [ "$PROG_PCT" -gt "$tg" ] && PROG_PCT=$tg
+        fi=$(( (fi + 1) % ${#_frames} )); _bar "$PROG_PCT" "${_frames:$fi:1}" "$t"; sleep 0.01
+    done
+    _bar "$PROG_PCT" "✔" "$t"
+    if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
+}
 
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
 
@@ -42,14 +80,36 @@ STUNNEL_CERT=/etc/stunnel/stunnel.pem
 # ASK FOR DOMAIN
 # ═══════════════════════════════════════════
 clear
-echo -e "${BGreen}============================================${NC}"
-echo -e "${BCyan}    SSH + WEBSOCKET + SSL VPN INSTALLER      ${NC}"
-echo -e "${BGreen}============================================${NC}"
+printf '\033[?25l'   # hide cursor for the intro animation
+# gradient ASCII banner, revealed line-by-line
+_banner=(
+"    ███████╗███████╗██╗  ██╗    ██╗   ██╗██████╗ ███╗   ██╗"
+"    ██╔════╝██╔════╝██║  ██║    ██║   ██║██╔══██╗████╗  ██║"
+"    ███████╗███████╗███████║    ██║   ██║██████╔╝██╔██╗ ██║"
+"    ╚════██║╚════██║██╔══██║    ╚██╗ ██╔╝██╔═══╝ ██║╚██╗██║"
+"    ███████║███████║██║  ██║     ╚████╔╝ ██║     ██║ ╚████║"
+"    ╚══════╝╚══════╝╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝  ╚═══╝"
+)
+_grad=("$TEAL" "$TEAL" "$SKY" "$SKY" "$BCyan" "$BCyan")
 echo ""
-echo -e "${BYellow}Enter your domain name (pointed at this server's IP).${NC}"
-echo -e "${BYellow}Leave blank to use a self-signed certificate.${NC}"
+for i in "${!_banner[@]}"; do
+    echo -e "  ${_grad[$i]}${BOLD}${_banner[$i]}${NC}"
+    sleep 0.05
+done
+echo -e "         ${GRY}ws${NC} ${DIM}·${NC} ${GRY}ssl${NC} ${DIM}·${NC} ${GRY}openssh${NC} ${DIM}·${NC} ${GRY}dropbear${NC} ${DIM}·${NC} ${GRY}v2ray${NC}   ${BWHITE}${BOLD}server installer${NC}"
 echo ""
-read -rp "  Domain: " DOMAIN
+printf '\033[?25h'   # restore cursor for the prompt
+
+# ── styled domain prompt ──
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${TEAL}│${NC}  ${BWHITE}${BOLD}DOMAIN SETUP${NC}                                        ${TEAL}│${NC}"
+echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}Enter a domain pointed at this server, or leave${NC}     ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}blank to use a self-signed certificate (connect${NC}     ${TEAL}│${NC}"
+echo -e "  ${TEAL}│${NC}  ${GRY}by IP).${NC}                                              ${TEAL}│${NC}"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
 DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
 
 apt-get install -y curl >/dev/null 2>&1 || true
@@ -57,12 +117,24 @@ SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{pri
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
 
+# ── system info panel ──
+_OS=$( (. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME") || echo "Linux" )
+echo ""
+echo -e "  ${GRY}┌─ ${BWHITE}${BOLD}SYSTEM${NC} ${GRY}────────────────────────────────────────────┐${NC}"
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Server IP" "$SERVER_IP"
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "OS" "$_OS"
 if [ -n "$DOMAIN" ]; then
-    echo -e "\n${BGreen}Using domain:${NC} $DOMAIN"
+    printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${LIME}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "domain: $DOMAIN"
 else
-    echo -e "\n${BYellow}No domain — a self-signed certificate will be used.${NC}"
+    printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "self-signed (connect by IP)"
 fi
-sleep 1
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Steps" "$INSTALL_TOTAL install phases"
+echo -e "  ${GRY}└──────────────────────────────────────────────────────┘${NC}"
+echo ""
+echo -e "  ${TEAL}${BOLD}▸ Installing — sit tight${NC}${GRY}, this runs itself.${NC}"
+echo ""
+sleep 0.4
+UI_SILENT=1   # from here on, the single progress bar is the only output
 
 # ─── Package manager setup ───────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
@@ -79,19 +151,13 @@ APT="apt-get install -y \
     -o Dpkg::Options::='--force-confdef' \
     -o Dpkg::Options::='--force-confold'"
 
-info "Updating package list..."
+phase "System packages"
 apt-get update -y </dev/null >/dev/null 2>&1
-
-echo ""
-echo -e "${BGreen}============================================${NC}"
-echo -e "${BCyan}     INSTALLING VPN PROTOCOLS                ${NC}"
-echo -e "${BGreen}============================================${NC}"
-echo ""
 
 # ═══════════════════════════════════════════
 # SECTION 1 — OPENSSH
 # ═══════════════════════════════════════════
-info "Installing & configuring OpenSSH..."
+phase "OpenSSH server"
 eval "$APT openssh-server curl" </dev/null >/dev/null 2>&1
 
 SSHD_CONF=/etc/ssh/sshd_config
@@ -123,7 +189,7 @@ success "OpenSSH configured on port 22"
 # ═══════════════════════════════════════════
 # SECTION 2 — DROPBEAR (direct SSH targets)
 # ═══════════════════════════════════════════
-info "Installing Dropbear (ports 109 & 143)..."
+phase "Dropbear SSH"
 eval "$APT dropbear" </dev/null >/dev/null 2>&1
 
 mkdir -p /etc/dropbear
@@ -151,7 +217,7 @@ success "Dropbear running on ports 109 and 143"
 # ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
 # ═══════════════════════════════════════════
-info "Building high-performance Go WebSocket/SSH proxy (port 80)..."
+phase "WebSocket proxy"
 
 # Remove any leftover Python proxy from a previous install.
 rm -f /usr/local/bin/ws-proxy.py 2>/dev/null || true
@@ -391,7 +457,7 @@ success "WebSocket/SSH proxy installed (port 80)"
 # ═══════════════════════════════════════════
 # SECTION 4 — SSL CERTIFICATE
 # ═══════════════════════════════════════════
-info "Setting up SSL certificate..."
+phase "SSL certificate"
 eval "$APT stunnel4 openssl" </dev/null >/dev/null 2>&1
 mkdir -p /etc/stunnel
 
@@ -437,7 +503,7 @@ systemctl start ws-proxy >/dev/null 2>&1 || true
 #   443 -> WebSocket proxy (SSL + payload)
 #   447 -> OpenSSH direct  (plain SSL)
 # ═══════════════════════════════════════════
-info "Configuring Stunnel (SSL on 443 & 447)..."
+phase "Stunnel TLS"
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || true
 
 cat > /etc/stunnel/stunnel.conf <<EOF
@@ -467,7 +533,7 @@ success "Stunnel running — SSL 443 (payload) & 447 (direct SSH)"
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
 # ═══════════════════════════════════════════
-info "Opening firewall ports..."
+phase "Firewall rules"
 if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
@@ -480,7 +546,7 @@ fi
 # ═══════════════════════════════════════════
 # SECTION 6b — BANDWIDTH MONITOR (vnstat)
 # ═══════════════════════════════════════════
-info "Installing bandwidth monitor (vnstat)..."
+phase "Bandwidth monitor"
 eval "$APT vnstat" </dev/null >/dev/null 2>&1 || true
 # Detect the primary network interface and register it with vnstat.
 PRIMARY_IFACE=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
@@ -497,7 +563,7 @@ success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
 #   These are installed but Xray itself stays OFF until activated in the menu.
 # ═══════════════════════════════════════════
-info "Installing Xray helper scripts (config generator + limit checker)..."
+phase "Xray / V2Ray"
 
 # --- config generator: rebuilds Xray config from the accounts file --------
 cat > /usr/local/bin/xray-gen <<'XGEOF'
@@ -657,7 +723,7 @@ success "Xray helper scripts installed (quota + expiry enforcement ready)"
 # ═══════════════════════════════════════════
 # SECTION 7 — INSTALL THE 'menu' COMMAND
 # ═══════════════════════════════════════════
-info "Installing management panel (menu command)..."
+phase "Management panel"
 
 cat > /usr/local/bin/menu <<'MENUEOF'
 #!/bin/bash
@@ -1424,7 +1490,7 @@ success "Management panel installed — type 'menu' to open it"
 # ═══════════════════════════════════════════
 # DEFAULT SSH USERS (auto-created)
 # ═══════════════════════════════════════════
-info "Creating default SSH users..."
+phase "Default users"
 DEFAULT_USER_PASS="0000"
 DEFAULT_USER_DAYS=30
 DEFAULT_USER_EXP=$(date -d "+${DEFAULT_USER_DAYS} days" +"%Y-%m-%d")
@@ -1441,30 +1507,29 @@ done
 # ═══════════════════════════════════════════
 # FINAL MESSAGE
 # ═══════════════════════════════════════════
+UI_SILENT=0
+_ELAPSED=$(( SECONDS - INSTALL_T0 ))
 clear
-echo -e "${BGreen}============================================================${NC}"
-echo -e "${BPurple}      INSTALLATION COMPLETE — ALL PROTOCOLS INSTALLED       ${NC}"
-echo -e "${BGreen}============================================================${NC}"
 echo ""
-echo -e "  Host / Domain : ${BYellow}${DOMAIN:-$SERVER_IP}${NC}"
+echo -e "  ${LIME}${BOLD}  ✔  INSTALLATION COMPLETE${NC}   ${GRY}all protocols installed in ${BWHITE}${_ELAPSED}s${GRY}.${NC}"
 echo ""
-echo -e "  ${BCyan}Installed services & ports:${NC}"
-echo -e "    WebSocket (payload)  → 80"
-echo -e "    SSL + payload (TLS)  → 443"
-echo -e "    SSL direct SSH (TLS) → 447"
-echo -e "    OpenSSH              → 22"
-echo -e "    Dropbear             → 109, 143"
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+printf  "  ${TEAL}│${NC}  ${SKY}◆${NC} %-13s ${BWHITE}${BOLD}%-33.33s${NC}${TEAL}│${NC}\n" "Host / Domain" "${DOMAIN:-$SERVER_IP}"
+echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}SERVICES & PORTS${NC} ${TEAL}──────────────────────────────────┤${NC}"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "WebSocket (payload)" "80"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL + payload (TLS)" "443"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL direct SSH (TLS)" "447"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "OpenSSH" "22"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "Dropbear" "109, 143"
+echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}DEFAULT USERS${NC} ${GRY}(pass: 0000, ${DEFAULT_USER_DAYS}d)${NC} ${TEAL}────────────────────┤${NC}"
+printf  "  ${TEAL}│${NC}   ${PINK}●${NC} %-50s${TEAL}│${NC}\n" "deon · febo · geto · weon · ceon"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
 echo ""
-echo -e "  ${BCyan}Default SSH users (pass: 0000, valid ${DEFAULT_USER_DAYS} days):${NC}"
-echo -e "    deon · febo · geto · weon · ceon"
+echo -e "  ${GRY}Client tips${NC}"
+echo -e "    ${DIM}WS payload${NC}  GET / HTTP/1.1[crlf]Host: ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}[crlf]Upgrade: websocket[crlf][crlf]"
+echo -e "    ${DIM}SSL/SNI${NC}     ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
 echo ""
-echo -e "  ${BCyan}Client tips:${NC}"
-echo -e "    WebSocket payload : GET / HTTP/1.1[crlf]Host: ${DOMAIN:-$SERVER_IP}[crlf]Upgrade: websocket[crlf][crlf]"
-echo -e "    SSL/SNI host      : ${DOMAIN:-$SERVER_IP}"
-echo ""
-echo -e "${BGreen}============================================================${NC}"
-echo -e "${BYellow}   Type ${BGreen}menu${BYellow} to open the panel and create users.${NC}"
-echo -e "${BGreen}============================================================${NC}"
+echo -e "  ${TEAL}${BOLD}▸${NC} Type ${LIME}${BOLD}menu${NC} to open the control panel and create users."
 echo ""
 
 # ═══════════════════════════════════════════
