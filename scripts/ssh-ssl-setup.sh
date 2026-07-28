@@ -687,9 +687,8 @@ while IFS= read -r line; do
     fi
     # quota check
     if [ "$drop" -eq 0 ] && [ -n "$quota" ] && [ "$quota" -gt 0 ] 2>/dev/null; then
-        up=$(xray api stats --server=$XAPI -name "user>>>${rk}>>>traffic>>>uplink" 2>/dev/null | grep -o '[0-9]\+' | tail -1); up=${up:-0}
-        dn=$(xray api stats --server=$XAPI -name "user>>>${rk}>>>traffic>>>downlink" 2>/dev/null | grep -o '[0-9]\+' | tail -1); dn=${dn:-0}
-        [ $((up + dn)) -ge "$quota" ] && drop=1
+        used=$(xray api statsquery --server=$XAPI -pattern "user>>>${rk}>>>traffic" 2>/dev/null | grep -o '"value": *"[0-9]\+"' | grep -o '[0-9]\+' | awk '{s+=$1} END{print s+0}'); used=${used:-0}
+        [ "$used" -ge "$quota" ] && drop=1
     fi
     if [ "$drop" -eq 1 ]; then changed=1; else echo "$line" >> "$tmp"; fi
 done < "$XACC"
@@ -792,32 +791,48 @@ IFACE=$(cat "$CONF_DIR/iface.conf" 2>/dev/null)
 
 hb() { numfmt --to=iec --suffix=B --format="%.2f" "${1:-0}" 2>/dev/null || echo "${1:-0} B"; }
 
-# Prints "rx tx total" in bytes for all-time usage.
-# Uses vnstat (persists across reboots); falls back to /sys counters (since boot).
-bw_alltime() {
-    local rx tx line
-    if command -v vnstat >/dev/null 2>&1; then
-        line=$(vnstat -i "$IFACE" --oneline b 2>/dev/null)
-        rx=$(echo "$line" | cut -d';' -f13)
-        tx=$(echo "$line" | cut -d';' -f14)
+# Prints "rx tx total" in bytes for a scope: all | day | month.
+# vnstat JSON is authoritative (always reports bytes and is stable across
+# vnstat versions, unlike --oneline field offsets). Falls back to the kernel
+# /sys counters (since boot) so all-time never shows a bogus zero.
+bw_scope() {
+    local scope="$1" out=""
+    if command -v vnstat >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        out=$(vnstat -i "$IFACE" --json 2>/dev/null | python3 -c '
+import sys, json
+scope = sys.argv[1]
+try:
+    t = json.load(sys.stdin)["interfaces"][0]["traffic"]
+    if scope == "all":
+        e = t.get("total", {})
+    elif scope == "day":
+        e = (t.get("day") or [{}])[-1]
+    else:
+        e = (t.get("month") or [{}])[-1]
+    rx = int(e.get("rx", 0)); tx = int(e.get("tx", 0))
+    print(rx, tx, rx + tx)
+except Exception:
+    pass
+' "$scope" 2>/dev/null)
     fi
-    if ! [[ "$rx" =~ ^[0-9]+$ ]] || ! [[ "$tx" =~ ^[0-9]+$ ]]; then
-        rx=$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
-        tx=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
+    if ! [[ "$out" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+        if [ "$scope" = "all" ]; then
+            local rx tx
+            rx=$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
+            tx=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
+            out="$rx $tx $((rx + tx))"
+        else
+            out="0 0 0"
+        fi
     fi
-    echo "$rx $tx $((rx + tx))"
+    echo "$out"
 }
 
-# Prints "rx tx total" in bytes for a vnstat period label: d (today) or m (month).
-bw_period() {
-    local p="$1" line rx tx f
-    command -v vnstat >/dev/null 2>&1 || { echo "0 0 0"; return; }
-    line=$(vnstat -i "$IFACE" --oneline b 2>/dev/null)
-    if [ "$p" = "d" ]; then rx=$(echo "$line" | cut -d';' -f4);  tx=$(echo "$line" | cut -d';' -f5)
-    else                    rx=$(echo "$line" | cut -d';' -f9);  tx=$(echo "$line" | cut -d';' -f10); fi
-    [[ "$rx" =~ ^[0-9]+$ ]] || rx=0; [[ "$tx" =~ ^[0-9]+$ ]] || tx=0
-    echo "$rx $tx $((rx + tx))"
-}
+# Prints "rx tx total" in bytes for all-time usage.
+bw_alltime() { bw_scope all; }
+
+# Prints "rx tx total" in bytes for a period label: d (today) or m (month).
+bw_period() { case "$1" in d) bw_scope day;; *) bw_scope month;; esac; }
 
 banner() {
     clear
@@ -974,12 +989,17 @@ bandwidth() {
     while true; do
         section "BANDWIDTH MONITOR" "$SKY"
         read -r arx atx atot <<<"$(bw_alltime)"
+        read -r drx dtx dtot <<<"$(bw_period d)"
+        read -r mrx mtx mtot <<<"$(bw_period m)"
         line_top "$col"
         crow "$col" "${GR}TOTAL BANDWIDTH USED${NC}"
         crow "$col" "${W}${BOLD}$(hb "$atot")${NC}"
         line_mid "$col"
         row "$col" "${SKY}↓ Download${NC}   ${W}$(hb "$arx")${NC}"
         row "$col" "${ORANGE}↑ Upload${NC}     ${W}$(hb "$atx")${NC}"
+        line_mid "$col"
+        row "$col" "${GR}Today${NC}       ${W}$(hb "$dtot")${NC}"
+        row "$col" "${GR}This month${NC}  ${W}$(hb "$mtot")${NC}"
         line_bot "$col"
         echo ""
         echo -e "  ${G}● live${NC} ${GR}— updates every 2s · press ENTER to go back${NC}"
@@ -1196,11 +1216,12 @@ DROPEOF
 rebuild_config() { /usr/local/bin/xray-gen >/dev/null 2>&1; }
 
 # Total traffic used by a remark (uplink+downlink), in bytes.
+# Uses statsquery (a real xray-core subcommand — plain "stats" does not exist)
+# and sums every matching counter's value.
 xray_used() {
-    local up dn
-    up=$(xray api stats --server=127.0.0.1:10085 -name "user>>>$1>>>traffic>>>uplink" 2>/dev/null | grep -o '[0-9]\+' | tail -1)
-    dn=$(xray api stats --server=127.0.0.1:10085 -name "user>>>$1>>>traffic>>>downlink" 2>/dev/null | grep -o '[0-9]\+' | tail -1)
-    echo $(( ${up:-0} + ${dn:-0} ))
+    xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>$1>>>traffic" 2>/dev/null \
+        | grep -o '"value": *"[0-9]\+"' | grep -o '[0-9]\+' \
+        | awk '{s+=$1} END{print s+0}'
 }
 
 # Parse one account line into P_PROTO/P_RK/P_SEC/P_EXP/P_QUOTA (legacy 4-field = vmess).
