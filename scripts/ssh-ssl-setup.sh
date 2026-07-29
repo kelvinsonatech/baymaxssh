@@ -40,21 +40,49 @@ success() { [ "$UI_SILENT" = "1" ] && return 0; echo -e "${BGreen}[✓] $*${NC}"
 warn()    { echo -e "${BYellow}[!] $*${NC}"; }
 error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
-# ── advanced installer progress HUD (single animated gradient bar) ──
-INSTALL_TOTAL=11; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
-# simple, fast progress bar — drawn once per phase, zero added delay
-_TW=$(tput cols 2>/dev/null || echo 64); [ "$_TW" -gt 76 ] && _TW=76; [ "$_TW" -lt 44 ] && _TW=44
-phase() {  # phase "Title" — one instant redraw of the single progress line
-    INSTALL_STEP=$(( INSTALL_STEP + 1 ))
-    local t="$1" pct bw fl em el i fill="" track=""
-    pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
-    bw=$(( _TW - 40 )); [ "$bw" -lt 12 ] && bw=12
-    fl=$(( bw * pct / 100 )); em=$(( bw - fl )); el=$(( SECONDS - INSTALL_T0 ))
-    i=0; while [ "$i" -lt "$fl" ]; do fill="${fill}█"; i=$(( i + 1 )); done
-    i=0; while [ "$i" -lt "$em" ]; do track="${track}░"; i=$(( i + 1 )); done
-    printf "\r\033[K ${GRY}[${BWHITE}%2d${GRY}/%d]${NC} ${SKY}◆${NC} ${BWHITE}%-16.16s${NC} ${TEAL}%s${GRY}%s${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" \
-        "$INSTALL_STEP" "$INSTALL_TOTAL" "$t" "$fill" "$track" "$pct" "$el"
-    if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
+# ── advanced installer HUD ──────────────────────────────────────────
+# A growing, colour-graded checklist. Each phase prints exactly one crisp
+# line the instant it starts: the PREVIOUS step is stamped done (✔) with its
+# duration, and a slim gradient meter tracks overall progress. No spinners,
+# no sleeps — it renders as fast as the work runs.
+INSTALL_TOTAL=11; INSTALL_STEP=0; INSTALL_T0=$SECONDS
+_PH_T0=$SECONDS; _PH_NAME=""
+_TW=$(tput cols 2>/dev/null || echo 72); [ "$_TW" -gt 80 ] && _TW=80; [ "$_TW" -lt 48 ] && _TW=48
+# 6-stop cool→warm gradient used to colour the meter as it fills
+_MG=('\033[38;5;45m' '\033[38;5;44m' '\033[38;5;44m' '\033[38;5;48m' '\033[38;5;83m' '\033[38;5;155m')
+
+_meter() {  # _meter PCT  -> gradient-filled slim bar
+    local pct="$1" bw=22 fl em i seg gi out=""
+    fl=$(( bw * pct / 100 )); em=$(( bw - fl ))
+    i=0; while [ "$i" -lt "$fl" ]; do
+        seg=$(( i * 6 / bw )); [ "$seg" -gt 5 ] && seg=5
+        out="${out}${_MG[$seg]}━"; i=$(( i + 1 ))
+    done
+    out="${out}${GRY}"
+    i=0; while [ "$i" -lt "$em" ]; do out="${out}╌"; i=$(( i + 1 )); done
+    printf '%b' "$out${NC}"
+}
+
+# stamp the just-finished phase as a completed checklist row
+_seal() {
+    [ -z "$_PH_NAME" ] && return 0
+    local d=$(( SECONDS - _PH_T0 ))
+    printf "\r\033[K ${GRY}[${DIM}%02d${GRY}/%02d]${NC} ${LIME}✔${NC} ${DIM}%-18.18s${NC} ${GRY}%02ds${NC}\n" \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$_PH_NAME" "$d"
+}
+
+phase() {  # phase "Title"
+    _seal
+    INSTALL_STEP=$(( INSTALL_STEP + 1 )); _PH_NAME="$1"; _PH_T0=$SECONDS
+    local pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
+    # live "in progress" row for the current phase
+    printf "\r\033[K ${GRY}[${BWHITE}%02d${GRY}/%02d]${NC} ${SKY}▸${NC} ${BWHITE}${BOLD}%-18.18s${NC} %b ${TEAL}${BOLD}%3d%%${NC}" \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$1" "$(_meter "$pct")" "$pct"
+    if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then
+        _seal; _PH_NAME=""
+        local tot=$(( SECONDS - INSTALL_T0 ))
+        printf "\n ${LIME}${BOLD}✔ all %d phases complete${NC} ${GRY}in %02ds${NC}\n" "$INSTALL_TOTAL" "$tot"
+    fi
 }
 
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
@@ -81,7 +109,6 @@ _grad=('\033[38;5;201m' '\033[38;5;165m' '\033[38;5;39m' '\033[38;5;51m' '\033[3
 echo ""
 for i in "${!_banner[@]}"; do
     echo -e "  ${_grad[$i]}${BOLD}${_banner[$i]}${NC}"
-    sleep 0.05
 done
 echo -e "         ${GRY}ws${NC} ${DIM}·${NC} ${GRY}ssl${NC} ${DIM}·${NC} ${GRY}openssh${NC} ${DIM}·${NC} ${GRY}dropbear${NC} ${DIM}·${NC} ${GRY}v2ray${NC}   ${BWHITE}${BOLD}server installer${NC}"
 echo ""
@@ -118,10 +145,9 @@ fi
 printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Steps" "$INSTALL_TOTAL install phases"
 echo -e "  ${GRY}└──────────────────────────────────────────────────────┘${NC}"
 echo ""
-echo -e "  ${TEAL}${BOLD}▸ Installing — sit tight${NC}${GRY}, this runs itself.${NC}"
+echo -e "  ${TEAL}${BOLD}▸ Installing${NC}${GRY} — automated, no input needed.${NC}"
 echo ""
-sleep 0.4
-UI_SILENT=1   # from here on, the single progress bar is the only output
+UI_SILENT=1   # from here on, the checklist HUD is the only output
 
 # ─── Package manager setup ───────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
