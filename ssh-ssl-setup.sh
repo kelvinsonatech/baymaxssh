@@ -256,7 +256,7 @@ cat > "$BUILD_DIR/main.go" <<'GOEOF'
 //   * If nothing arrives quickly, it assumes a direct SSH client waiting
 //     for the banner and tunnels straight through.
 //
-// Backend SSH = Dropbear on 127.0.0.1:109.
+// Backend SSH = OpenSSH on 127.0.0.1:22.
 package main
 
 import (
@@ -269,7 +269,7 @@ import (
 
 const (
 	listenAddr  = "0.0.0.0:80"
-	backendAddr = "127.0.0.1:109"
+	backendAddr = "127.0.0.1:22"
 	peekTimeout = 3 * time.Second
 )
 
@@ -377,7 +377,7 @@ else
     cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
 import socket, threading
-BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=3
+BACKEND=('127.0.0.1',22); LISTEN=('0.0.0.0',80); T=3
 RESP=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 def pipe(s,d):
     try:
