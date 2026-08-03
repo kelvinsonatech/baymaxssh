@@ -21,3 +21,11 @@ resolution still works, `fuser -k 53/udp`, then restart resolved. After
 warning pointing at `journalctl -u slowdns` if it's not active. Also open
 UDP 53 in ufw. Client needs: NS domain, server.pub key, a public DNS resolver,
 and a normal SSH account (SlowDNS just tunnels to 127.0.0.1:22).
+
+**Do not let SlowDNS abort the installer.** The main script runs `set -e`. The
+SlowDNS phase has unguarded fail-prone commands (apt, `git clone` bamsoftware,
+`go build`); a non-zero exit there killed the whole install (left the box with
+no `menu`). Wrap the entire phase in `set +e` … `set -e`. Toolchain: try apt
+`golang-go` first, fall back to the official go.dev tarball (arch-aware) — apt's
+Go can be too old to build current dnstt. Backend is `127.0.0.1:22` (OpenSSH),
+matching the SSL-payload backend. Working impl landed after the errexit guard.
