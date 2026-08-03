@@ -40,21 +40,49 @@ success() { [ "$UI_SILENT" = "1" ] && return 0; echo -e "${BGreen}[✓] $*${NC}"
 warn()    { echo -e "${BYellow}[!] $*${NC}"; }
 error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 
-# ── advanced installer progress HUD (single animated gradient bar) ──
-INSTALL_TOTAL=12; INSTALL_STEP=0; PROG_PCT=0; INSTALL_T0=$SECONDS
-# simple, fast progress bar — drawn once per phase, zero added delay
-_TW=$(tput cols 2>/dev/null || echo 64); [ "$_TW" -gt 76 ] && _TW=76; [ "$_TW" -lt 44 ] && _TW=44
-phase() {  # phase "Title" — one instant redraw of the single progress line
-    INSTALL_STEP=$(( INSTALL_STEP + 1 ))
-    local t="$1" pct bw fl em el i fill="" track=""
-    pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
-    bw=$(( _TW - 40 )); [ "$bw" -lt 12 ] && bw=12
-    fl=$(( bw * pct / 100 )); em=$(( bw - fl )); el=$(( SECONDS - INSTALL_T0 ))
-    i=0; while [ "$i" -lt "$fl" ]; do fill="${fill}█"; i=$(( i + 1 )); done
-    i=0; while [ "$i" -lt "$em" ]; do track="${track}░"; i=$(( i + 1 )); done
-    printf "\r\033[K ${GRY}[${BWHITE}%2d${GRY}/%d]${NC} ${SKY}◆${NC} ${BWHITE}%-16.16s${NC} ${TEAL}%s${GRY}%s${NC} ${TEAL}${BOLD}%3d%%${NC} ${GRY}%02ds${NC}" \
-        "$INSTALL_STEP" "$INSTALL_TOTAL" "$t" "$fill" "$track" "$pct" "$el"
-    if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then printf "\n"; fi
+# ── advanced installer HUD ──────────────────────────────────────────
+# A growing, colour-graded checklist. Each phase prints exactly one crisp
+# line the instant it starts: the PREVIOUS step is stamped done (✔) with its
+# duration, and a slim gradient meter tracks overall progress. No spinners,
+# no sleeps — it renders as fast as the work runs.
+INSTALL_TOTAL=12; INSTALL_STEP=0; INSTALL_T0=$SECONDS
+_PH_T0=$SECONDS; _PH_NAME=""
+_TW=$(tput cols 2>/dev/null || echo 72); [ "$_TW" -gt 80 ] && _TW=80; [ "$_TW" -lt 48 ] && _TW=48
+# 6-stop cool→warm gradient used to colour the meter as it fills
+_MG=('\033[38;5;45m' '\033[38;5;44m' '\033[38;5;44m' '\033[38;5;48m' '\033[38;5;83m' '\033[38;5;155m')
+
+_meter() {  # _meter PCT  -> gradient-filled slim bar
+    local pct="$1" bw=22 fl em i seg gi out=""
+    fl=$(( bw * pct / 100 )); em=$(( bw - fl ))
+    i=0; while [ "$i" -lt "$fl" ]; do
+        seg=$(( i * 6 / bw )); [ "$seg" -gt 5 ] && seg=5
+        out="${out}${_MG[$seg]}━"; i=$(( i + 1 ))
+    done
+    out="${out}${GRY}"
+    i=0; while [ "$i" -lt "$em" ]; do out="${out}╌"; i=$(( i + 1 )); done
+    printf '%b' "$out${NC}"
+}
+
+# stamp the just-finished phase as a completed checklist row
+_seal() {
+    [ -z "$_PH_NAME" ] && return 0
+    local d=$(( SECONDS - _PH_T0 ))
+    printf "\r\033[K ${GRY}[${DIM}%02d${GRY}/%02d]${NC} ${LIME}✔${NC} ${DIM}%-18.18s${NC} ${GRY}%02ds${NC}\n" \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$_PH_NAME" "$d"
+}
+
+phase() {  # phase "Title"
+    _seal
+    INSTALL_STEP=$(( INSTALL_STEP + 1 )); _PH_NAME="$1"; _PH_T0=$SECONDS
+    local pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
+    # live "in progress" row for the current phase
+    printf "\r\033[K ${GRY}[${BWHITE}%02d${GRY}/%02d]${NC} ${SKY}▸${NC} ${BWHITE}${BOLD}%-18.18s${NC} %b ${TEAL}${BOLD}%3d%%${NC}" \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$1" "$(_meter "$pct")" "$pct"
+    if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then
+        _seal; _PH_NAME=""
+        local tot=$(( SECONDS - INSTALL_T0 ))
+        printf "\n ${LIME}${BOLD}✔ all %d phases complete${NC} ${GRY}in %02ds${NC}\n" "$INSTALL_TOTAL" "$tot"
+    fi
 }
 
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
@@ -81,7 +109,6 @@ _grad=('\033[38;5;201m' '\033[38;5;165m' '\033[38;5;39m' '\033[38;5;51m' '\033[3
 echo ""
 for i in "${!_banner[@]}"; do
     echo -e "  ${_grad[$i]}${BOLD}${_banner[$i]}${NC}"
-    sleep 0.05
 done
 echo -e "         ${GRY}ws${NC} ${DIM}·${NC} ${GRY}ssl${NC} ${DIM}·${NC} ${GRY}openssh${NC} ${DIM}·${NC} ${GRY}dropbear${NC} ${DIM}·${NC} ${GRY}v2ray${NC}   ${BWHITE}${BOLD}server installer${NC}"
 echo ""
@@ -98,18 +125,18 @@ echo -e "  ${TEAL}╰───────────────────�
 echo ""
 read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
 DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
+echo ""
 
-# ── SlowDNS (DNSTT) nameserver prompt ──
+# ── styled SlowDNS (NS) prompt — optional ──
+echo -e "  ${PINK}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${PINK}│${NC}  ${BWHITE}${BOLD}SLOWDNS SETUP${NC} ${GRY}(optional)${NC}                          ${PINK}│${NC}"
+echo -e "  ${PINK}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}Enter the NS host delegated to this server's IP${NC}     ${PINK}│${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}(e.g. dns.example.com). Requires an NS + A record${NC}   ${PINK}│${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}at your DNS host. Leave blank to skip SlowDNS.${NC}      ${PINK}│${NC}"
+echo -e "  ${PINK}╰──────────────────────────────────────────────────────╯${NC}"
 echo ""
-echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
-echo -e "  ${TEAL}│${NC}  ${BWHITE}${BOLD}SLOWDNS SETUP${NC} ${GRY}(optional)${NC}                             ${TEAL}│${NC}"
-echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
-echo -e "  ${TEAL}│${NC}  ${GRY}Enter the NS host delegated to this server's IP${NC}     ${TEAL}│${NC}"
-echo -e "  ${TEAL}│${NC}  ${GRY}(e.g. dns.example.com). Requires an NS + A record${NC}   ${TEAL}│${NC}"
-echo -e "  ${TEAL}│${NC}  ${GRY}at your DNS host. Leave blank to skip SlowDNS.${NC}      ${TEAL}│${NC}"
-echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
-echo ""
-read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}NS domain${NC} ${GRY}(blank = skip)${NC} : ")" NS_DOMAIN
+read -rp "$(echo -e "   ${PINK}❯${NC} ${BWHITE}NS domain${NC} ${GRY}(blank = skip)${NC} : ")" NS_DOMAIN
 NS_DOMAIN="$(echo "$NS_DOMAIN" | tr -d '[:space:]')"
 
 apt-get install -y curl >/dev/null 2>&1 || true
@@ -129,13 +156,15 @@ if [ -n "$DOMAIN" ]; then
 else
     printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "self-signed (connect by IP)"
 fi
+if [ -n "$NS_DOMAIN" ]; then
+    printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${PINK}%-33.33s${NC}${GRY}│${NC}\n" "SlowDNS" "NS: $NS_DOMAIN"
+fi
 printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Steps" "$INSTALL_TOTAL install phases"
 echo -e "  ${GRY}└──────────────────────────────────────────────────────┘${NC}"
 echo ""
-echo -e "  ${TEAL}${BOLD}▸ Installing — sit tight${NC}${GRY}, this runs itself.${NC}"
+echo -e "  ${TEAL}${BOLD}▸ Installing${NC}${GRY} — automated, no input needed.${NC}"
 echo ""
-sleep 0.4
-UI_SILENT=1   # from here on, the single progress bar is the only output
+UI_SILENT=1   # from here on, the checklist HUD is the only output
 
 # ─── Package manager setup ───────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
@@ -216,89 +245,6 @@ systemctl restart dropbear
 success "Dropbear running on ports 109 and 143"
 
 # ═══════════════════════════════════════════
-# SECTION 2b — SLOWDNS (DNSTT) over UDP 53
-# ═══════════════════════════════════════════
-phase "SlowDNS (DNSTT)"
-NS_DOMAIN=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
-if [ -n "$NS_DOMAIN" ]; then
-    systemctl stop slowdns >/dev/null 2>&1 || true
-    killall dnstt-server >/dev/null 2>&1 || true
-
-    # --- Free UDP 53: systemd-resolved usually holds it and silently kills
-    #     dnstt. Disable its stub listener but keep name resolution working.
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        mkdir -p /etc/systemd/resolved.conf.d
-        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
-        rm -f /etc/resolv.conf 2>/dev/null || true
-        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
-        systemctl restart systemd-resolved >/dev/null 2>&1 || true
-    fi
-    # Anything else squatting on :53 (e.g. dnsmasq) — stop it.
-    fuser -k 53/udp >/dev/null 2>&1 || true
-
-    # --- Toolchain: prefer distro golang; fall back to snap. ---
-    eval "$APT git golang-go" </dev/null >/dev/null 2>&1
-    GO_BIN="$(command -v go || true)"
-    if [ -z "$GO_BIN" ]; then
-        eval "$APT snapd" </dev/null >/dev/null 2>&1
-        systemctl enable --now snapd.socket >/dev/null 2>&1 || true
-        [ -L /snap ] || ln -s /var/lib/snapd/snap /snap >/dev/null 2>&1 || true
-        sleep 2
-        snap install go --classic >/dev/null 2>&1 || true
-        GO_BIN=/snap/bin/go
-    fi
-
-    # --- Build dnstt-server if we don't already have the binary. ---
-    if [ ! -x /usr/local/bin/dnstt-server ] && [ -x "$GO_BIN" ]; then
-        cd /root; rm -rf dnstt
-        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
-        if [ -d dnstt/dnstt-server ]; then
-            ( cd dnstt/dnstt-server && "$GO_BIN" build >/dev/null 2>&1 \
-              && mv -f dnstt-server /usr/local/bin/dnstt-server \
-              && chmod +x /usr/local/bin/dnstt-server )
-        fi
-    fi
-
-    if [ -x /usr/local/bin/dnstt-server ]; then
-        mkdir -p /etc/slowdns
-        if [ ! -f /etc/slowdns/server.key ]; then
-            /usr/local/bin/dnstt-server -gen-key \
-                -privkey-file /etc/slowdns/server.key \
-                -pubkey-file /etc/slowdns/server.pub >/dev/null 2>&1
-        fi
-        cp -f /etc/slowdns/server.pub "$CONF_DIR/slowdns_pub.txt" 2>/dev/null || true
-
-        cat > /etc/systemd/system/slowdns.service <<EOF
-[Unit]
-Description=SlowDNS Tunnel Server
-After=network.target
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/slowdns
-ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable slowdns >/dev/null 2>&1 || true
-        systemctl restart slowdns >/dev/null 2>&1 || true
-        sleep 1
-        if systemctl is-active --quiet slowdns 2>/dev/null; then
-            success "SlowDNS running on UDP 53 (NS: $NS_DOMAIN)"
-        else
-            warn "SlowDNS installed but not active — check 'journalctl -u slowdns' (port 53 in use?)"
-        fi
-    else
-        warn "SlowDNS skipped — Go toolchain unavailable, could not build dnstt-server"
-    fi
-else
-    info "SlowDNS skipped — no NS domain provided"
-fi
-
-# ═══════════════════════════════════════════
 # SECTION 3 — DUAL-MODE WEBSOCKET/SSH PROXY (port 80)
 # ═══════════════════════════════════════════
 phase "WebSocket proxy"
@@ -327,7 +273,7 @@ cat > "$BUILD_DIR/main.go" <<'GOEOF'
 //   * If nothing arrives quickly, it assumes a direct SSH client waiting
 //     for the banner and tunnels straight through.
 //
-// Backend SSH = Dropbear on 127.0.0.1:109.
+// Backend SSH = OpenSSH on 127.0.0.1:22.
 package main
 
 import (
@@ -340,7 +286,7 @@ import (
 
 const (
 	listenAddr  = "0.0.0.0:80"
-	backendAddr = "127.0.0.1:109"
+	backendAddr = "127.0.0.1:22"
 	peekTimeout = 3 * time.Second
 )
 
@@ -448,7 +394,7 @@ else
     cat > /usr/local/bin/ws-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
 import socket, threading
-BACKEND=('127.0.0.1',109); LISTEN=('0.0.0.0',80); T=3
+BACKEND=('127.0.0.1',22); LISTEN=('0.0.0.0',80); T=3
 RESP=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
 def pipe(s,d):
     try:
@@ -622,10 +568,10 @@ if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
-    ufw allow 53/udp >/dev/null 2>&1
+    ufw allow 53/udp >/dev/null 2>&1   # SlowDNS (dnstt) tunnel
     success "UFW rules applied"
 else
-    warn "ufw not found — open ports manually: TCP 22 80 109 143 443 447, UDP 53"
+    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447 + 53/udp"
 fi
 
 # ═══════════════════════════════════════════
@@ -645,6 +591,108 @@ systemctl restart vnstat >/dev/null 2>&1 || true
 success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
 
 # ═══════════════════════════════════════════
+# SECTION 6b2 — SLOWDNS (dnstt) — best-effort, never aborts the installer
+#   Tunnels UDP :53 -> OpenSSH 127.0.0.1:22. Whole phase runs with errexit
+#   OFF so a slow/failed apt, clone or build can never kill the install.
+# ═══════════════════════════════════════════
+phase "SlowDNS (dnstt)"
+set +e
+NS_DOMAIN=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+if [ -n "$NS_DOMAIN" ]; then
+    systemctl stop slowdns >/dev/null 2>&1
+    killall dnstt-server >/dev/null 2>&1
+
+    # --- Free UDP 53: systemd-resolved holds it and silently kills dnstt.
+    #     Disable its stub listener but keep name resolution working. ---
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
+        rm -f /etc/resolv.conf 2>/dev/null
+        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        systemctl restart systemd-resolved >/dev/null 2>&1
+    fi
+    fuser -k 53/udp >/dev/null 2>&1   # anything else squatting on :53
+
+    # --- Build dnstt-server. dnstt needs a modern Go (>=1.21); apt often ships
+    #     one too old (Debian 11=1.15, 12=1.19), so we try the toolchain on PATH
+    #     first and, if the build fails, install the official go.dev tarball and
+    #     retry. A helper does one build attempt with a given `go` binary. ---
+    if [ ! -x /usr/local/bin/dnstt-server ]; then
+        eval "$APT git golang-go ca-certificates" </dev/null >/dev/null 2>&1
+        cd /root; rm -rf dnstt
+        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+
+        _try_build() {   # $1 = path to a go binary
+            [ -x "$1" ] || command -v "$1" >/dev/null 2>&1 || return 1
+            [ -d /root/dnstt/dnstt-server ] || return 1
+            ( cd /root/dnstt/dnstt-server \
+              && export HOME=/root GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOFLAGS=-mod=mod \
+              && "$1" build -o dnstt-server . >/dev/null 2>&1 \
+              && install -m 0755 dnstt-server /usr/local/bin/dnstt-server )
+        }
+
+        # 1) try whatever `go` apt gave us (fast path on modern distros)
+        APT_GO="$(command -v go 2>/dev/null)"
+        [ -n "$APT_GO" ] && _try_build "$APT_GO"
+
+        # 2) if that didn't produce a binary, fetch modern Go and retry
+        if [ ! -x /usr/local/bin/dnstt-server ]; then
+            ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+            case "$ARCH" in
+                amd64|x86_64)  GOA=amd64;;
+                arm64|aarch64) GOA=arm64;;
+                armhf|armv7l)  GOA=armv6l;;
+                *)             GOA=amd64;;
+            esac
+            if curl -fsSL --connect-timeout 25 -o /tmp/go.tgz \
+                 "https://go.dev/dl/go1.22.5.linux-${GOA}.tar.gz" >/dev/null 2>&1; then
+                rm -rf /usr/local/go; tar -C /usr/local -xzf /tmp/go.tgz >/dev/null 2>&1
+                rm -f /tmp/go.tgz
+                _try_build /usr/local/go/bin/go
+            fi
+        fi
+    fi
+
+    if [ -x /usr/local/bin/dnstt-server ]; then
+        mkdir -p /etc/slowdns
+        # generate the server keypair once; reuse on re-runs
+        if [ ! -s /etc/slowdns/server.key ] || [ ! -s /etc/slowdns/server.pub ]; then
+            ( cd /etc/slowdns && /usr/local/bin/dnstt-server -gen-key \
+                -privkey-file server.key -pubkey-file server.pub >/dev/null 2>&1 )
+        fi
+
+        cat > /etc/systemd/system/slowdns.service <<EOF
+[Unit]
+Description=SlowDNS (dnstt) Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable --now slowdns.service >/dev/null 2>&1
+        if systemctl is-active --quiet slowdns 2>/dev/null; then
+            success "SlowDNS active — UDP 53 -> OpenSSH 22 (NS: $NS_DOMAIN)"
+        else
+            warn "SlowDNS installed but not active — check: journalctl -u slowdns"
+        fi
+    else
+        warn "SlowDNS skipped — could not build dnstt-server (install continues)"
+    fi
+else
+    info "SlowDNS skipped — no NS domain provided"
+fi
+set -e   # re-enable errexit for the rest of the installer
+
+# ═══════════════════════════════════════════
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
 #   These are installed but Xray itself stays OFF until activated in the menu.
 # ═══════════════════════════════════════════
@@ -657,32 +705,33 @@ CONF_DIR=/etc/ssh-panel
 XACC=/etc/xray/accounts.txt
 XCONF=/usr/local/etc/xray/config.json
 XAPI=10085
-# VMess ports
-VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_TLS=8445; VM_SPLIT_NONE=8082
-# VLESS ports
-VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_TLS=8448; VL_SPLIT_NONE=8085
-# Trojan ports (TLS only)
-TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
-# If the operator handed port 443 to V2Ray (SSL payload disabled), move that
-# protocol's WS-TLS listener onto 443.
-P443=$(cat /etc/xray/port443 2>/dev/null)
-case "$P443" in
-    vmess)  VM_WS_TLS=443;;
-    vless)  VL_WS_TLS=443;;
-    trojan) TR_WS_TLS=443;;
-esac
-mkdir -p /etc/xray /usr/local/etc/xray; touch "$XACC"
-DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
-HOST="${DOMAIN:-$(cat "$CONF_DIR/ip.conf" 2>/dev/null)}"
-if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-    CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"; KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
-else
-    [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
-        -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
-    CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
-fi
+# --- Shared canonical port scheme -----------------------------------------
+# VMess, VLESS and Trojan all use the SAME standard ports. Two inbounds can
+# never bind one TCP port at once, so the canonical ports are handed to the
+# protocols that actually HAVE ACCOUNTS, in priority order (VMess, then VLESS,
+# then Trojan). So if you only use Trojan, Trojan gets the standard VMess ports.
+# Ports are Cloudflare-supported: TLS on 2083/2087/2096, plain HTTP on
+# 8080/2082/2095 (443 itself stays reserved for the SSL payload / 443 handover).
+C_WS_TLS=2083; C_WS_NONE=8080; C_HTTP_NONE=2082; C_HTTP_TLS=2087; C_SPLIT_TLS=2096; C_SPLIT_NONE=2095
 
-# Build per-protocol client lists from the accounts file.
+# Ports held by processes OTHER than xray (xray's own current listeners are
+# ignored, so regenerating the config never makes the ports drift on re-runs).
+_busy=" $(ss -ltnpH 2>/dev/null | grep -v '"xray"' | awk '{print $4}' | sed 's/.*://' | sort -un | tr '\n' ' ') "
+_used=" $XAPI 22 80 109 143 443 447 53 "   # reserved for SSH/SSL/SlowDNS/API
+_alloc() {   # $1 = preferred port, $2 = variable name to set with the free port.
+    # NOTE: sets a variable rather than echoing — command substitution runs in a
+    # subshell, which would discard the running $_used reservation between calls.
+    local p="$1"
+    while :; do
+        case "$_used$_busy" in *" $p "*) p=$((p+1)); continue;; esac
+        break
+    done
+    _used="$_used$p "; eval "$2=$p"
+}
+
+mkdir -p /etc/xray /usr/local/etc/xray; touch "$XACC"
+
+# Build per-protocol client lists FIRST so we know which protocols are in use.
 # Record format: proto|remark|secret|expiry|quota   (legacy 4-field = vmess)
 VMESS=""; VLESS=""; TROJAN=""
 _add() { case "$1" in
@@ -702,6 +751,62 @@ while IFS='|' read -r f1 f2 f3 f4 f5; do
         trojan) _add trojan "{\"password\":\"$sec\",\"email\":\"$rk\"}";;
     esac
 done < "$XACC"
+
+# A protocol is ACTIVE (gets real ports + inbounds) if it has accounts OR it was
+# handed port 443 — otherwise the 443 listener would never bind and the handover
+# fails. Read the 443 flag now so it feeds both port assignment and emission.
+P443=$(cat /etc/xray/port443 2>/dev/null)
+ACTIVE=""
+[ -n "$VMESS" ]  && ACTIVE="$ACTIVE vmess"
+[ -n "$VLESS" ]  && ACTIVE="$ACTIVE vless"
+[ -n "$TROJAN" ] && ACTIVE="$ACTIVE trojan"
+case "$P443" in vmess|vless|trojan)
+    case " $ACTIVE " in *" $P443 "*) :;; *) ACTIVE="$ACTIVE $P443";; esac ;;
+esac
+_active() { case " $ACTIVE " in *" $1 "*) return 0;; esac; return 1; }
+
+# Default every protocol to the canonical numbers (used only for display when a
+# protocol has no accounts yet), then hand the real free ports to the ACTIVE
+# protocols, in priority order (so ports never collide across protocols).
+for _pfx in VM VL TR; do
+    eval "${_pfx}_WS_TLS=$C_WS_TLS;     ${_pfx}_WS_NONE=$C_WS_NONE"
+    eval "${_pfx}_HTTP_NONE=$C_HTTP_NONE; ${_pfx}_HTTP_TLS=$C_HTTP_TLS"
+    eval "${_pfx}_SPLIT_TLS=$C_SPLIT_TLS; ${_pfx}_SPLIT_NONE=$C_SPLIT_NONE"
+done
+_assign() {   # $1 = prefix (VM/VL/TR): give this protocol the canonical scheme
+    _alloc $C_WS_TLS    ${1}_WS_TLS;    _alloc $C_WS_NONE   ${1}_WS_NONE
+    _alloc $C_HTTP_NONE ${1}_HTTP_NONE; _alloc $C_HTTP_TLS  ${1}_HTTP_TLS
+    _alloc $C_SPLIT_TLS ${1}_SPLIT_TLS; _alloc $C_SPLIT_NONE ${1}_SPLIT_NONE
+}
+_active vmess  && _assign VM
+_active vless  && _assign VL
+_active trojan && _assign TR
+
+# Persist resolved ports so the menu's link/QR display matches the live config
+# (written BEFORE the 443 handover so the base numbers are stable).
+cat > /etc/xray/ports.conf <<PORTS
+VM_WS_TLS=$VM_WS_TLS; VM_WS_NONE=$VM_WS_NONE; VM_HTTP_NONE=$VM_HTTP_NONE; VM_HTTP_TLS=$VM_HTTP_TLS; VM_SPLIT_TLS=$VM_SPLIT_TLS; VM_SPLIT_NONE=$VM_SPLIT_NONE
+VL_WS_TLS=$VL_WS_TLS; VL_WS_NONE=$VL_WS_NONE; VL_HTTP_NONE=$VL_HTTP_NONE; VL_HTTP_TLS=$VL_HTTP_TLS; VL_SPLIT_TLS=$VL_SPLIT_TLS; VL_SPLIT_NONE=$VL_SPLIT_NONE
+TR_WS_TLS=$TR_WS_TLS; TR_WS_NONE=$TR_WS_NONE; TR_HTTP_NONE=$TR_HTTP_NONE; TR_HTTP_TLS=$TR_HTTP_TLS; TR_SPLIT_TLS=$TR_SPLIT_TLS; TR_SPLIT_NONE=$TR_SPLIT_NONE
+PORTS
+
+# If the operator handed port 443 to V2Ray (SSL payload disabled), move that
+# protocol's WS-TLS listener onto 443 (P443 was read above).
+case "$P443" in
+    vmess)  VM_WS_TLS=443;;
+    vless)  VL_WS_TLS=443;;
+    trojan) TR_WS_TLS=443;;
+esac
+
+DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+HOST="${DOMAIN:-$(cat "$CONF_DIR/ip.conf" 2>/dev/null)}"
+if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"; KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+else
+    [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+        -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
+    CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
+fi
 
 # Emit one inbound. args: port proto clients net security path
 ib() {
@@ -727,24 +832,35 @@ ib() {
 
 INB="{\"listen\":\"127.0.0.1\",\"port\":$XAPI,\"protocol\":\"dokodemo-door\",\"settings\":{\"address\":\"127.0.0.1\"},\"tag\":\"api\"}"
 _ib() { INB="$INB,$(ib "$@")"; }
-# VMess (6 variants)
-_ib $VM_WS_TLS    vmess "$VMESS" ws        tls  /vmess
-_ib $VM_WS_NONE   vmess "$VMESS" ws        none /vmess
-_ib $VM_HTTP_NONE vmess "$VMESS" tcphttp   none /
-_ib $VM_HTTP_TLS  vmess "$VMESS" tcphttp   tls  /
-_ib $VM_SPLIT_TLS vmess "$VMESS" splithttp tls  /split
-_ib $VM_SPLIT_NONE vmess "$VMESS" splithttp none /split
-# VLESS (6 variants)
-_ib $VL_WS_TLS    vless "$VLESS" ws        tls  /vless
-_ib $VL_WS_NONE   vless "$VLESS" ws        none /vless
-_ib $VL_HTTP_NONE vless "$VLESS" tcphttp   none /
-_ib $VL_HTTP_TLS  vless "$VLESS" tcphttp   tls  /
-_ib $VL_SPLIT_TLS vless "$VLESS" splithttp tls  /split
-_ib $VL_SPLIT_NONE vless "$VLESS" splithttp none /split
-# Trojan (TLS-only: 3 variants)
-_ib $TR_TCP_TLS   trojan "$TROJAN" tcp       tls /
-_ib $TR_WS_TLS    trojan "$TROJAN" ws        tls /trojan
-_ib $TR_SPLIT_TLS trojan "$TROJAN" splithttp tls /split
+# Only ACTIVE protocols get inbounds (has accounts, or was handed port 443), so
+# unused protocols never occupy the shared canonical ports. A protocol handed
+# 443 with no accounts yet still binds (empty client list) so the handover
+# succeeds; create an account afterwards to actually use it. All three use the
+# SAME 6-variant lineup.
+if _active vmess; then
+    _ib $VM_WS_TLS     vmess "$VMESS" ws        tls  /vmess
+    _ib $VM_WS_NONE    vmess "$VMESS" ws        none /vmess
+    _ib $VM_HTTP_NONE  vmess "$VMESS" tcphttp   none /
+    _ib $VM_HTTP_TLS   vmess "$VMESS" tcphttp   tls  /
+    _ib $VM_SPLIT_TLS  vmess "$VMESS" splithttp tls  /split
+    _ib $VM_SPLIT_NONE vmess "$VMESS" splithttp none /split
+fi
+if _active vless; then
+    _ib $VL_WS_TLS     vless "$VLESS" ws        tls  /vless
+    _ib $VL_WS_NONE    vless "$VLESS" ws        none /vless
+    _ib $VL_HTTP_NONE  vless "$VLESS" tcphttp   none /
+    _ib $VL_HTTP_TLS   vless "$VLESS" tcphttp   tls  /
+    _ib $VL_SPLIT_TLS  vless "$VLESS" splithttp tls  /split
+    _ib $VL_SPLIT_NONE vless "$VLESS" splithttp none /split
+fi
+if _active trojan; then
+    _ib $TR_WS_TLS     trojan "$TROJAN" ws        tls  /trojan
+    _ib $TR_WS_NONE    trojan "$TROJAN" ws        none /trojan
+    _ib $TR_HTTP_NONE  trojan "$TROJAN" tcphttp   none /
+    _ib $TR_HTTP_TLS   trojan "$TROJAN" tcphttp   tls  /
+    _ib $TR_SPLIT_TLS  trojan "$TROJAN" splithttp tls  /split
+    _ib $TR_SPLIT_NONE trojan "$TROJAN" splithttp none /split
+fi
 
 cat > "$XCONF" <<JSON
 {
@@ -785,9 +901,8 @@ while IFS= read -r line; do
     fi
     # quota check
     if [ "$drop" -eq 0 ] && [ -n "$quota" ] && [ "$quota" -gt 0 ] 2>/dev/null; then
-        up=$(xray api stats --server=$XAPI -name "user>>>${rk}>>>traffic>>>uplink" 2>/dev/null | grep -o '[0-9]\+' | tail -1); up=${up:-0}
-        dn=$(xray api stats --server=$XAPI -name "user>>>${rk}>>>traffic>>>downlink" 2>/dev/null | grep -o '[0-9]\+' | tail -1); dn=${dn:-0}
-        [ $((up + dn)) -ge "$quota" ] && drop=1
+        used=$(xray api statsquery --server=$XAPI -pattern "user>>>${rk}>>>traffic" 2>/dev/null | grep -o '"value": *"[0-9]\+"' | grep -o '[0-9]\+' | awk '{s+=$1} END{print s+0}'); used=${used:-0}
+        [ "$used" -ge "$quota" ] && drop=1
     fi
     if [ "$drop" -eq 1 ]; then changed=1; else echo "$line" >> "$tmp"; fi
 done < "$XACC"
@@ -890,32 +1005,48 @@ IFACE=$(cat "$CONF_DIR/iface.conf" 2>/dev/null)
 
 hb() { numfmt --to=iec --suffix=B --format="%.2f" "${1:-0}" 2>/dev/null || echo "${1:-0} B"; }
 
-# Prints "rx tx total" in bytes for all-time usage.
-# Uses vnstat (persists across reboots); falls back to /sys counters (since boot).
-bw_alltime() {
-    local rx tx line
-    if command -v vnstat >/dev/null 2>&1; then
-        line=$(vnstat -i "$IFACE" --oneline b 2>/dev/null)
-        rx=$(echo "$line" | cut -d';' -f13)
-        tx=$(echo "$line" | cut -d';' -f14)
+# Prints "rx tx total" in bytes for a scope: all | day | month.
+# vnstat JSON is authoritative (always reports bytes and is stable across
+# vnstat versions, unlike --oneline field offsets). Falls back to the kernel
+# /sys counters (since boot) so all-time never shows a bogus zero.
+bw_scope() {
+    local scope="$1" out=""
+    if command -v vnstat >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        out=$(vnstat -i "$IFACE" --json 2>/dev/null | python3 -c '
+import sys, json
+scope = sys.argv[1]
+try:
+    t = json.load(sys.stdin)["interfaces"][0]["traffic"]
+    if scope == "all":
+        e = t.get("total", {})
+    elif scope == "day":
+        e = (t.get("day") or [{}])[-1]
+    else:
+        e = (t.get("month") or [{}])[-1]
+    rx = int(e.get("rx", 0)); tx = int(e.get("tx", 0))
+    print(rx, tx, rx + tx)
+except Exception:
+    pass
+' "$scope" 2>/dev/null)
     fi
-    if ! [[ "$rx" =~ ^[0-9]+$ ]] || ! [[ "$tx" =~ ^[0-9]+$ ]]; then
-        rx=$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
-        tx=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
+    if ! [[ "$out" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+        if [ "$scope" = "all" ]; then
+            local rx tx
+            rx=$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
+            tx=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
+            out="$rx $tx $((rx + tx))"
+        else
+            out="0 0 0"
+        fi
     fi
-    echo "$rx $tx $((rx + tx))"
+    echo "$out"
 }
 
-# Prints "rx tx total" in bytes for a vnstat period label: d (today) or m (month).
-bw_period() {
-    local p="$1" line rx tx f
-    command -v vnstat >/dev/null 2>&1 || { echo "0 0 0"; return; }
-    line=$(vnstat -i "$IFACE" --oneline b 2>/dev/null)
-    if [ "$p" = "d" ]; then rx=$(echo "$line" | cut -d';' -f4);  tx=$(echo "$line" | cut -d';' -f5)
-    else                    rx=$(echo "$line" | cut -d';' -f9);  tx=$(echo "$line" | cut -d';' -f10); fi
-    [[ "$rx" =~ ^[0-9]+$ ]] || rx=0; [[ "$tx" =~ ^[0-9]+$ ]] || tx=0
-    echo "$rx $tx $((rx + tx))"
-}
+# Prints "rx tx total" in bytes for all-time usage.
+bw_alltime() { bw_scope all; }
+
+# Prints "rx tx total" in bytes for a period label: d (today) or m (month).
+bw_period() { case "$1" in d) bw_scope day;; *) bw_scope month;; esac; }
 
 banner() {
     clear
@@ -940,7 +1071,7 @@ status_bar() {
     read -r _rx _tx _tot <<<"$(bw_alltime)"
     row "$col" "${GR}DATA${NC}    ${W}${BOLD}$(hb "$_tot")${NC} ${GR}used${NC}"
     local svcline="${GR}SVC${NC}    "
-    for s in ssh dropbear ws-proxy stunnel4 slowdns; do
+    for s in ssh dropbear ws-proxy stunnel4; do
         if systemctl is-active --quiet "$s" 2>/dev/null; then dot="${G}●${NC}"; else dot="${R}○${NC}"; fi
         svcline+="${dot} ${s}   "
     done
@@ -958,10 +1089,6 @@ show_ports() {
     row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
     row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
     row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
-    local _ns; _ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
-    if [ -n "$_ns" ]; then
-        row "$col" "${LIME}▸${NC} SlowDNS (UDP 53)     ${GR}→${NC} ${W}${_ns}${NC}"
-    fi
     line_bot "$col"
 }
 
@@ -1009,6 +1136,21 @@ create_user() {
     row "$col2" "${DIM}Upgrade: websocket[crlf][crlf]${NC}"
     row "$col2" "${GR}SSL / SNI host${NC}  ${W}${HOST_DISPLAY}${NC}"
     line_bot "$col2"
+
+    # --- SlowDNS details (only when installed) ---
+    local ns pub
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat /etc/slowdns/server.pub 2>/dev/null)
+    if [ -n "$ns" ] && [ -x /usr/local/bin/dnstt-server ] && [ -n "$pub" ]; then
+        local col3="$PINK"
+        line_top "$col3"; crow "$col3" "${W}${BOLD}SLOWDNS (DNSTT)${NC}"; line_mid "$col3"
+        row "$col3" "${GR}NS domain${NC}  ${W}${ns}${NC}"
+        row "$col3" "${GR}Server IP${NC}  ${W}${SERVER_IP}${NC}"
+        row "$col3" "${GR}Public key${NC}"
+        row "$col3" "${W}${pub}${NC}"
+        line_bot "$col3"
+        echo -e "  ${GR}Use the same username/password above with a SlowDNS app.${NC}"
+    fi
     pause
 }
 
@@ -1076,12 +1218,17 @@ bandwidth() {
     while true; do
         section "BANDWIDTH MONITOR" "$SKY"
         read -r arx atx atot <<<"$(bw_alltime)"
+        read -r drx dtx dtot <<<"$(bw_period d)"
+        read -r mrx mtx mtot <<<"$(bw_period m)"
         line_top "$col"
         crow "$col" "${GR}TOTAL BANDWIDTH USED${NC}"
         crow "$col" "${W}${BOLD}$(hb "$atot")${NC}"
         line_mid "$col"
         row "$col" "${SKY}↓ Download${NC}   ${W}$(hb "$arx")${NC}"
         row "$col" "${ORANGE}↑ Upload${NC}     ${W}$(hb "$atx")${NC}"
+        line_mid "$col"
+        row "$col" "${GR}Today${NC}       ${W}$(hb "$dtot")${NC}"
+        row "$col" "${GR}This month${NC}  ${W}$(hb "$mtot")${NC}"
         line_bot "$col"
         echo ""
         echo -e "  ${G}● live${NC} ${GR}— updates every 2s · press ENTER to go back${NC}"
@@ -1119,7 +1266,7 @@ renew_user() {
 
 service_status() {
     section "SERVICE STATUS" "$P"
-    local col="$P" svcs="ssh dropbear ws-proxy stunnel4 slowdns"
+    local col="$P" svcs="ssh dropbear ws-proxy stunnel4"
     [ -f /usr/local/bin/xray ] && svcs="$svcs xray"
     line_top "$col"
     for svc in $svcs; do
@@ -1141,36 +1288,7 @@ restart_services() {
     systemctl restart dropbear 2>/dev/null
     systemctl restart ws-proxy 2>/dev/null
     systemctl restart stunnel4 2>/dev/null
-    systemctl restart slowdns 2>/dev/null
     ok "All services restarted."
-    pause
-}
-
-slowdns_info() {
-    section "SLOWDNS INFO" "$TEAL"
-    local ns pub
-    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
-    pub=$(cat "$CONF_DIR/slowdns_pub.txt" 2>/dev/null)
-    if [ -z "$ns" ] || [ -z "$pub" ]; then
-        err "SlowDNS is not configured on this server."
-        note "Re-run the installer and enter an NS domain to enable it."
-        pause; return
-    fi
-    if systemctl is-active --quiet slowdns 2>/dev/null; then
-        ok "Service: ${G}running${NC} (UDP 53)"
-    else
-        err "Service: ${R}stopped${NC}  — use option 10 to restart"
-    fi
-    echo ""
-    echo -e "  ${GR}NS domain${NC}"
-    echo -e "    ${W}${BOLD}${ns}${NC}"
-    echo ""
-    echo -e "  ${GR}Public key${NC}"
-    echo -e "    ${LIME}${pub}${NC}"
-    echo ""
-    echo -e "  ${GR}DNS resolver${NC}  ${W}1.1.1.1${NC}  ${GR}(or 8.8.8.8)${NC}"
-    echo ""
-    echo -e "  ${GR}Login${NC}  use any SSH user (option 1) — SlowDNS tunnels to SSH."
     pause
 }
 
@@ -1180,13 +1298,12 @@ slowdns_info() {
 XBIN=/usr/local/bin/xray
 XCONF=/usr/local/etc/xray/config.json
 XACC=/etc/xray/accounts.txt
-# Dedicated ports (no clash with 22/80/109/143/443/447)
-# VMess
-VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_TLS=8445; VM_SPLIT_NONE=8082
-# VLESS
-VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_TLS=8448; VL_SPLIT_NONE=8085
-# Trojan (TLS only)
-TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
+# Default ports (fallback). The config generator resolves the real ports from a
+# shared canonical scheme with auto free-port fallback and persists them to
+# /etc/xray/ports.conf; xray_paths() loads that file so links match the config.
+VM_WS_TLS=2083; VM_WS_NONE=8080; VM_HTTP_NONE=2082; VM_HTTP_TLS=2087; VM_SPLIT_TLS=2096; VM_SPLIT_NONE=2095
+VL_WS_TLS=2083; VL_WS_NONE=8080; VL_HTTP_NONE=2082; VL_HTTP_TLS=2087; VL_SPLIT_TLS=2096; VL_SPLIT_NONE=2095
+TR_WS_TLS=2083; TR_WS_NONE=8080; TR_HTTP_NONE=2082; TR_HTTP_TLS=2087; TR_SPLIT_TLS=2096; TR_SPLIT_NONE=2095
 # Port-443 handover flag (when set, V2Ray owns 443 and SSL payload is off)
 XP443F=/etc/xray/port443
 STCONF=/etc/stunnel/stunnel.conf
@@ -1195,6 +1312,8 @@ STCERT=/etc/stunnel/stunnel.pem
 xray_paths() {
     mkdir -p /etc/xray /usr/local/etc/xray
     touch "$XACC"
+    # Load the ports the generator actually assigned (shared scheme + fallback).
+    [ -f /etc/xray/ports.conf ] && . /etc/xray/ports.conf
     XDOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
     XIP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
     XHOST="${XDOMAIN:-$XIP}"
@@ -1327,11 +1446,12 @@ DROPEOF
 rebuild_config() { /usr/local/bin/xray-gen >/dev/null 2>&1; }
 
 # Total traffic used by a remark (uplink+downlink), in bytes.
+# Uses statsquery (a real xray-core subcommand — plain "stats" does not exist)
+# and sums every matching counter's value.
 xray_used() {
-    local up dn
-    up=$(xray api stats --server=127.0.0.1:10085 -name "user>>>$1>>>traffic>>>uplink" 2>/dev/null | grep -o '[0-9]\+' | tail -1)
-    dn=$(xray api stats --server=127.0.0.1:10085 -name "user>>>$1>>>traffic>>>downlink" 2>/dev/null | grep -o '[0-9]\+' | tail -1)
-    echo $(( ${up:-0} + ${dn:-0} ))
+    xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>$1>>>traffic" 2>/dev/null \
+        | grep -o '"value": *"[0-9]\+"' | grep -o '[0-9]\+' \
+        | awk '{s+=$1} END{print s+0}'
 }
 
 # Parse one account line into P_PROTO/P_RK/P_SEC/P_EXP/P_QUOTA (legacy 4-field = vmess).
@@ -1396,9 +1516,12 @@ show_links() {  # remark
         echo -e "  ${G}${BOLD}SPLIT TLS${NC}  ${DIM}(split · $VL_SPLIT_TLS)${NC}\n  $(mkuri vless $P_SEC $VL_SPLIT_TLS splithttp tls /split "${rk}-SPLIT-TLS")"; echo -e "$sep"
         echo -e "  ${G}${BOLD}SPLIT HTTP${NC} ${DIM}(split · $VL_SPLIT_NONE)${NC}\n  $(mkuri vless $P_SEC $VL_SPLIT_NONE splithttp none /split "${rk}-SPLIT-HTTP")"; echo -e "$sep";;
       trojan)
-        echo -e "  ${G}${BOLD}TCP TLS${NC}    ${DIM}(tcp · $TR_TCP_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_TCP_TLS tcp tls / "${rk}-TCP-TLS")"; echo -e "$sep"
-        echo -e "  ${G}${BOLD}WS TLS${NC}     ${DIM}(ws · $TR_WS_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_WS_TLS ws tls /trojan "${rk}-WS-TLS")"; echo -e "$sep"
-        echo -e "  ${G}${BOLD}SPLIT TLS${NC}  ${DIM}(split · $TR_SPLIT_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_SPLIT_TLS splithttp tls /split "${rk}-SPLIT-TLS")"; echo -e "$sep";;
+        echo -e "  ${G}${BOLD}TLS${NC}        ${DIM}(ws · $TR_WS_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_WS_TLS ws tls /trojan "${rk}-TLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}NoneTLS${NC}    ${DIM}(ws · $TR_WS_NONE)${NC}\n  $(mkuri trojan $P_SEC $TR_WS_NONE ws none /trojan "${rk}-NoneTLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}HTTP None${NC}  ${DIM}(tcp · $TR_HTTP_NONE)${NC}\n  $(mkuri trojan $P_SEC $TR_HTTP_NONE tcphttp none / "${rk}-HTTP-None")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}HTTP TLS${NC}   ${DIM}(tcp · $TR_HTTP_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_HTTP_TLS tcphttp tls / "${rk}-HTTP-TLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}SPLIT TLS${NC}  ${DIM}(split · $TR_SPLIT_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_SPLIT_TLS splithttp tls /split "${rk}-SPLIT-TLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}SPLIT HTTP${NC} ${DIM}(split · $TR_SPLIT_NONE)${NC}\n  $(mkuri trojan $P_SEC $TR_SPLIT_NONE splithttp none /split "${rk}-SPLIT-HTTP")"; echo -e "$sep";;
     esac
 }
 
@@ -1406,7 +1529,7 @@ xray_open_ports() {
     command -v ufw >/dev/null 2>&1 || return
     for P in $VM_WS_TLS $VM_WS_NONE $VM_HTTP_NONE $VM_HTTP_TLS $VM_SPLIT_TLS $VM_SPLIT_NONE \
              $VL_WS_TLS $VL_WS_NONE $VL_HTTP_NONE $VL_HTTP_TLS $VL_SPLIT_TLS $VL_SPLIT_NONE \
-             $TR_TCP_TLS $TR_WS_TLS $TR_SPLIT_TLS; do
+             $TR_WS_TLS $TR_WS_NONE $TR_HTTP_NONE $TR_HTTP_TLS $TR_SPLIT_TLS $TR_SPLIT_NONE; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
 }
@@ -1564,6 +1687,34 @@ xray_menu() {
     done
 }
 
+slowdns_info() {
+    section "SLOWDNS (DNSTT)" "$PINK"
+    local col="$PINK"
+    local ns pub st
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat /etc/slowdns/server.pub 2>/dev/null)
+    line_top "$col"
+    if [ -z "$ns" ] || [ ! -x /usr/local/bin/dnstt-server ]; then
+        row "$col" "${GR}SlowDNS is not installed on this server.${NC}"
+        row "$col" "${GR}Re-run the installer and enter an NS domain.${NC}"
+        line_bot "$col"; pause; return
+    fi
+    if systemctl is-active --quiet slowdns 2>/dev/null; then
+        st="${G}● running${NC}"; else st="${R}○ stopped${NC}"; fi
+    row "$col" "${GR}Status${NC}    $st"
+    row "$col" "${GR}NS domain${NC} ${W}${ns}${NC}"
+    row "$col" "${GR}Backend${NC}   ${W}127.0.0.1:22 (OpenSSH)${NC}"
+    row "$col" "${GR}Server IP${NC} ${W}${SERVER_IP}${NC}"
+    line_mid "$col"
+    row "$col" "${GR}Public key${NC}"
+    row "$col" "${W}${pub}${NC}"
+    line_bot "$col"
+    echo ""
+    echo -e "  ${GR}Client: use NS '${W}${ns}${GR}', the public key above, and any${NC}"
+    echo -e "  ${GR}SlowDNS-capable app (SSH account = your normal users).${NC}"
+    pause
+}
+
 menu_item() {  # menu_item NUM ICON "Label" color
     echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
 }
@@ -1582,7 +1733,7 @@ while true; do
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
-    menu_item "11" "🐌" "SlowDNS info / config"   "$TEAL"
+    menu_item "11" "🐌" "SlowDNS info"            "$PINK"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1641,9 +1792,6 @@ printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL direct SSH (TLS)" "447"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "OpenSSH" "22"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "Dropbear" "109, 143"
-if [ -n "$NS_DOMAIN" ] && [ -x /usr/local/bin/dnstt-server ]; then
-    printf "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SlowDNS (UDP 53)" "$NS_DOMAIN"
-fi
 echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}DEFAULT USERS${NC} ${GRY}(pass: 0000, ${DEFAULT_USER_DAYS}d)${NC} ${TEAL}────────────────────┤${NC}"
 printf  "  ${TEAL}│${NC}   ${PINK}●${NC} %-50s${TEAL}│${NC}\n" "deon · febo · geto · weon · ceon"
 echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
@@ -1651,10 +1799,6 @@ echo ""
 echo -e "  ${GRY}Client tips${NC}"
 echo -e "    ${DIM}WS payload${NC}  GET / HTTP/1.1[crlf]Host: ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}[crlf]Upgrade: websocket[crlf][crlf]"
 echo -e "    ${DIM}SSL/SNI${NC}     ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
-if [ -n "$NS_DOMAIN" ] && [ -f "$CONF_DIR/slowdns_pub.txt" ]; then
-    echo -e "    ${DIM}SlowDNS${NC}     NS ${BWHITE}${NS_DOMAIN}${NC}  ${GRY}pubkey:${NC}"
-    echo -e "                ${LIME}$(cat "$CONF_DIR/slowdns_pub.txt")${NC}"
-fi
 echo ""
 echo -e "  ${TEAL}${BOLD}▸${NC} Type ${LIME}${BOLD}menu${NC} to open the control panel and create users."
 echo ""
