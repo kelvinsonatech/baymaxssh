@@ -705,12 +705,44 @@ CONF_DIR=/etc/ssh-panel
 XACC=/etc/xray/accounts.txt
 XCONF=/usr/local/etc/xray/config.json
 XAPI=10085
-# VMess ports
-VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_TLS=8445; VM_SPLIT_NONE=8082
-# VLESS ports
-VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_TLS=8448; VL_SPLIT_NONE=8085
-# Trojan ports (TLS only)
-TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
+# --- Shared canonical port scheme -----------------------------------------
+# VMess, VLESS and Trojan all PREFER the same standard ports. Because two
+# inbounds can never bind one TCP port at the same time, ports are allocated in
+# order (VMess first) and any port already taken — by another inbound in this
+# config or by a non-Xray service on the box — automatically rolls up to the
+# next free port. Result: the same familiar numbers whenever they're free, a
+# clean fallback when they aren't.
+C_WS_TLS=8443; C_WS_NONE=8080; C_HTTP_NONE=8081; C_HTTP_TLS=8444; C_SPLIT_TLS=8445; C_SPLIT_NONE=8082
+
+# Ports held by processes OTHER than xray. Xray's own current listeners are
+# ignored, so regenerating the config never makes the ports drift on re-runs.
+_busy=" $(ss -ltnpH 2>/dev/null | grep -v '"xray"' | awk '{print $4}' | sed 's/.*://' | sort -un | tr '\n' ' ') "
+_used=" $XAPI 22 80 109 143 443 447 53 "   # reserved for SSH/SSL/SlowDNS/API
+_alloc() {   # $1 = preferred port; echoes the first free port and reserves it
+    local p="$1"
+    while :; do
+        case "$_used$_busy" in *" $p "*) p=$((p+1)); continue;; esac
+        break
+    done
+    _used="$_used$p "; printf '%s' "$p"
+}
+VM_WS_TLS=$(_alloc $C_WS_TLS);       VM_WS_NONE=$(_alloc $C_WS_NONE)
+VM_HTTP_NONE=$(_alloc $C_HTTP_NONE); VM_HTTP_TLS=$(_alloc $C_HTTP_TLS)
+VM_SPLIT_TLS=$(_alloc $C_SPLIT_TLS); VM_SPLIT_NONE=$(_alloc $C_SPLIT_NONE)
+VL_WS_TLS=$(_alloc $C_WS_TLS);       VL_WS_NONE=$(_alloc $C_WS_NONE)
+VL_HTTP_NONE=$(_alloc $C_HTTP_NONE); VL_HTTP_TLS=$(_alloc $C_HTTP_TLS)
+VL_SPLIT_TLS=$(_alloc $C_SPLIT_TLS); VL_SPLIT_NONE=$(_alloc $C_SPLIT_NONE)
+TR_TCP_TLS=$(_alloc $C_WS_TLS);      TR_WS_TLS=$(_alloc $C_WS_TLS);  TR_SPLIT_TLS=$(_alloc $C_SPLIT_TLS)
+
+# Persist the resolved base ports so the menu's link/QR display matches the
+# live config exactly (written BEFORE the 443 handover so the base is stable).
+mkdir -p /etc/xray
+cat > /etc/xray/ports.conf <<PORTS
+VM_WS_TLS=$VM_WS_TLS; VM_WS_NONE=$VM_WS_NONE; VM_HTTP_NONE=$VM_HTTP_NONE; VM_HTTP_TLS=$VM_HTTP_TLS; VM_SPLIT_TLS=$VM_SPLIT_TLS; VM_SPLIT_NONE=$VM_SPLIT_NONE
+VL_WS_TLS=$VL_WS_TLS; VL_WS_NONE=$VL_WS_NONE; VL_HTTP_NONE=$VL_HTTP_NONE; VL_HTTP_TLS=$VL_HTTP_TLS; VL_SPLIT_TLS=$VL_SPLIT_TLS; VL_SPLIT_NONE=$VL_SPLIT_NONE
+TR_TCP_TLS=$TR_TCP_TLS; TR_WS_TLS=$TR_WS_TLS; TR_SPLIT_TLS=$TR_SPLIT_TLS
+PORTS
+
 # If the operator handed port 443 to V2Ray (SSL payload disabled), move that
 # protocol's WS-TLS listener onto 443.
 P443=$(cat /etc/xray/port443 2>/dev/null)
@@ -1230,12 +1262,11 @@ restart_services() {
 XBIN=/usr/local/bin/xray
 XCONF=/usr/local/etc/xray/config.json
 XACC=/etc/xray/accounts.txt
-# Dedicated ports (no clash with 22/80/109/143/443/447)
-# VMess
+# Default ports (fallback). The config generator resolves the real ports from a
+# shared canonical scheme with auto free-port fallback and persists them to
+# /etc/xray/ports.conf; xray_paths() loads that file so links match the config.
 VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_TLS=8445; VM_SPLIT_NONE=8082
-# VLESS
 VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_TLS=8448; VL_SPLIT_NONE=8085
-# Trojan (TLS only)
 TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
 # Port-443 handover flag (when set, V2Ray owns 443 and SSL payload is off)
 XP443F=/etc/xray/port443
@@ -1245,6 +1276,8 @@ STCERT=/etc/stunnel/stunnel.pem
 xray_paths() {
     mkdir -p /etc/xray /usr/local/etc/xray
     touch "$XACC"
+    # Load the ports the generator actually assigned (shared scheme + fallback).
+    [ -f /etc/xray/ports.conf ] && . /etc/xray/ports.conf
     XDOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
     XIP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
     XHOST="${XDOMAIN:-$XIP}"
