@@ -706,16 +706,16 @@ XACC=/etc/xray/accounts.txt
 XCONF=/usr/local/etc/xray/config.json
 XAPI=10085
 # --- Shared canonical port scheme -----------------------------------------
-# VMess, VLESS and Trojan all PREFER the same standard ports. Because two
-# inbounds can never bind one TCP port at the same time, ports are allocated in
-# order (VMess first) and any port already taken — by another inbound in this
-# config or by a non-Xray service on the box — automatically rolls up to the
-# next free port. Result: the same familiar numbers whenever they're free, a
-# clean fallback when they aren't.
+# VMess, VLESS and Trojan all use the SAME standard ports. Two inbounds can
+# never bind one TCP port at once, so the canonical ports are handed to the
+# protocols that actually HAVE ACCOUNTS, in priority order (VMess, then VLESS,
+# then Trojan). So if you only use Trojan, Trojan gets the standard VMess ports
+# (8443 WS-TLS, 8080 WS, 8081 HTTP, 8444 HTTP-TLS, 8445/8082 split). When more
+# than one protocol is in use, the later ones roll up to the next free ports.
 C_WS_TLS=8443; C_WS_NONE=8080; C_HTTP_NONE=8081; C_HTTP_TLS=8444; C_SPLIT_TLS=8445; C_SPLIT_NONE=8082
 
-# Ports held by processes OTHER than xray. Xray's own current listeners are
-# ignored, so regenerating the config never makes the ports drift on re-runs.
+# Ports held by processes OTHER than xray (xray's own current listeners are
+# ignored, so regenerating the config never makes the ports drift on re-runs).
 _busy=" $(ss -ltnpH 2>/dev/null | grep -v '"xray"' | awk '{print $4}' | sed 's/.*://' | sort -un | tr '\n' ' ') "
 _used=" $XAPI 22 80 109 143 443 447 53 "   # reserved for SSH/SSL/SlowDNS/API
 _alloc() {   # $1 = preferred port; echoes the first free port and reserves it
@@ -726,43 +726,10 @@ _alloc() {   # $1 = preferred port; echoes the first free port and reserves it
     done
     _used="$_used$p "; printf '%s' "$p"
 }
-VM_WS_TLS=$(_alloc $C_WS_TLS);       VM_WS_NONE=$(_alloc $C_WS_NONE)
-VM_HTTP_NONE=$(_alloc $C_HTTP_NONE); VM_HTTP_TLS=$(_alloc $C_HTTP_TLS)
-VM_SPLIT_TLS=$(_alloc $C_SPLIT_TLS); VM_SPLIT_NONE=$(_alloc $C_SPLIT_NONE)
-VL_WS_TLS=$(_alloc $C_WS_TLS);       VL_WS_NONE=$(_alloc $C_WS_NONE)
-VL_HTTP_NONE=$(_alloc $C_HTTP_NONE); VL_HTTP_TLS=$(_alloc $C_HTTP_TLS)
-VL_SPLIT_TLS=$(_alloc $C_SPLIT_TLS); VL_SPLIT_NONE=$(_alloc $C_SPLIT_NONE)
-TR_TCP_TLS=$(_alloc $C_WS_TLS);      TR_WS_TLS=$(_alloc $C_WS_TLS);  TR_SPLIT_TLS=$(_alloc $C_SPLIT_TLS)
 
-# Persist the resolved base ports so the menu's link/QR display matches the
-# live config exactly (written BEFORE the 443 handover so the base is stable).
-mkdir -p /etc/xray
-cat > /etc/xray/ports.conf <<PORTS
-VM_WS_TLS=$VM_WS_TLS; VM_WS_NONE=$VM_WS_NONE; VM_HTTP_NONE=$VM_HTTP_NONE; VM_HTTP_TLS=$VM_HTTP_TLS; VM_SPLIT_TLS=$VM_SPLIT_TLS; VM_SPLIT_NONE=$VM_SPLIT_NONE
-VL_WS_TLS=$VL_WS_TLS; VL_WS_NONE=$VL_WS_NONE; VL_HTTP_NONE=$VL_HTTP_NONE; VL_HTTP_TLS=$VL_HTTP_TLS; VL_SPLIT_TLS=$VL_SPLIT_TLS; VL_SPLIT_NONE=$VL_SPLIT_NONE
-TR_TCP_TLS=$TR_TCP_TLS; TR_WS_TLS=$TR_WS_TLS; TR_SPLIT_TLS=$TR_SPLIT_TLS
-PORTS
-
-# If the operator handed port 443 to V2Ray (SSL payload disabled), move that
-# protocol's WS-TLS listener onto 443.
-P443=$(cat /etc/xray/port443 2>/dev/null)
-case "$P443" in
-    vmess)  VM_WS_TLS=443;;
-    vless)  VL_WS_TLS=443;;
-    trojan) TR_WS_TLS=443;;
-esac
 mkdir -p /etc/xray /usr/local/etc/xray; touch "$XACC"
-DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
-HOST="${DOMAIN:-$(cat "$CONF_DIR/ip.conf" 2>/dev/null)}"
-if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-    CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"; KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
-else
-    [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
-        -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
-    CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
-fi
 
-# Build per-protocol client lists from the accounts file.
+# Build per-protocol client lists FIRST so we know which protocols are in use.
 # Record format: proto|remark|secret|expiry|quota   (legacy 4-field = vmess)
 VMESS=""; VLESS=""; TROJAN=""
 _add() { case "$1" in
@@ -782,6 +749,50 @@ while IFS='|' read -r f1 f2 f3 f4 f5; do
         trojan) _add trojan "{\"password\":\"$sec\",\"email\":\"$rk\"}";;
     esac
 done < "$XACC"
+
+# Default every protocol to the canonical numbers (used only for display when a
+# protocol has no accounts yet), then hand the real free ports to the protocols
+# that ARE in use, in priority order.
+for _pfx in VM VL TR; do
+    eval "${_pfx}_WS_TLS=$C_WS_TLS;     ${_pfx}_WS_NONE=$C_WS_NONE"
+    eval "${_pfx}_HTTP_NONE=$C_HTTP_NONE; ${_pfx}_HTTP_TLS=$C_HTTP_TLS"
+    eval "${_pfx}_SPLIT_TLS=$C_SPLIT_TLS; ${_pfx}_SPLIT_NONE=$C_SPLIT_NONE"
+done
+_assign() {   # $1 = prefix (VM/VL/TR): give this protocol the canonical scheme
+    eval "$1_WS_TLS=\$(_alloc \$C_WS_TLS)";       eval "$1_WS_NONE=\$(_alloc \$C_WS_NONE)"
+    eval "$1_HTTP_NONE=\$(_alloc \$C_HTTP_NONE)"; eval "$1_HTTP_TLS=\$(_alloc \$C_HTTP_TLS)"
+    eval "$1_SPLIT_TLS=\$(_alloc \$C_SPLIT_TLS)"; eval "$1_SPLIT_NONE=\$(_alloc \$C_SPLIT_NONE)"
+}
+[ -n "$VMESS" ]  && _assign VM
+[ -n "$VLESS" ]  && _assign VL
+[ -n "$TROJAN" ] && _assign TR
+
+# Persist resolved ports so the menu's link/QR display matches the live config
+# (written BEFORE the 443 handover so the base numbers are stable).
+cat > /etc/xray/ports.conf <<PORTS
+VM_WS_TLS=$VM_WS_TLS; VM_WS_NONE=$VM_WS_NONE; VM_HTTP_NONE=$VM_HTTP_NONE; VM_HTTP_TLS=$VM_HTTP_TLS; VM_SPLIT_TLS=$VM_SPLIT_TLS; VM_SPLIT_NONE=$VM_SPLIT_NONE
+VL_WS_TLS=$VL_WS_TLS; VL_WS_NONE=$VL_WS_NONE; VL_HTTP_NONE=$VL_HTTP_NONE; VL_HTTP_TLS=$VL_HTTP_TLS; VL_SPLIT_TLS=$VL_SPLIT_TLS; VL_SPLIT_NONE=$VL_SPLIT_NONE
+TR_WS_TLS=$TR_WS_TLS; TR_WS_NONE=$TR_WS_NONE; TR_HTTP_NONE=$TR_HTTP_NONE; TR_HTTP_TLS=$TR_HTTP_TLS; TR_SPLIT_TLS=$TR_SPLIT_TLS; TR_SPLIT_NONE=$TR_SPLIT_NONE
+PORTS
+
+# If the operator handed port 443 to V2Ray (SSL payload disabled), move that
+# protocol's WS-TLS listener onto 443.
+P443=$(cat /etc/xray/port443 2>/dev/null)
+case "$P443" in
+    vmess)  VM_WS_TLS=443;;
+    vless)  VL_WS_TLS=443;;
+    trojan) TR_WS_TLS=443;;
+esac
+
+DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+HOST="${DOMAIN:-$(cat "$CONF_DIR/ip.conf" 2>/dev/null)}"
+if [ -n "$DOMAIN" ] && [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"; KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+else
+    [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+        -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
+    CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
+fi
 
 # Emit one inbound. args: port proto clients net security path
 ib() {
@@ -807,24 +818,32 @@ ib() {
 
 INB="{\"listen\":\"127.0.0.1\",\"port\":$XAPI,\"protocol\":\"dokodemo-door\",\"settings\":{\"address\":\"127.0.0.1\"},\"tag\":\"api\"}"
 _ib() { INB="$INB,$(ib "$@")"; }
-# VMess (6 variants)
-_ib $VM_WS_TLS    vmess "$VMESS" ws        tls  /vmess
-_ib $VM_WS_NONE   vmess "$VMESS" ws        none /vmess
-_ib $VM_HTTP_NONE vmess "$VMESS" tcphttp   none /
-_ib $VM_HTTP_TLS  vmess "$VMESS" tcphttp   tls  /
-_ib $VM_SPLIT_TLS vmess "$VMESS" splithttp tls  /split
-_ib $VM_SPLIT_NONE vmess "$VMESS" splithttp none /split
-# VLESS (6 variants)
-_ib $VL_WS_TLS    vless "$VLESS" ws        tls  /vless
-_ib $VL_WS_NONE   vless "$VLESS" ws        none /vless
-_ib $VL_HTTP_NONE vless "$VLESS" tcphttp   none /
-_ib $VL_HTTP_TLS  vless "$VLESS" tcphttp   tls  /
-_ib $VL_SPLIT_TLS vless "$VLESS" splithttp tls  /split
-_ib $VL_SPLIT_NONE vless "$VLESS" splithttp none /split
-# Trojan (TLS-only: 3 variants)
-_ib $TR_TCP_TLS   trojan "$TROJAN" tcp       tls /
-_ib $TR_WS_TLS    trojan "$TROJAN" ws        tls /trojan
-_ib $TR_SPLIT_TLS trojan "$TROJAN" splithttp tls /split
+# Only protocols WITH accounts get inbounds, so unused protocols never occupy
+# the shared canonical ports. All three use the SAME 6-variant lineup.
+if [ -n "$VMESS" ]; then
+    _ib $VM_WS_TLS     vmess "$VMESS" ws        tls  /vmess
+    _ib $VM_WS_NONE    vmess "$VMESS" ws        none /vmess
+    _ib $VM_HTTP_NONE  vmess "$VMESS" tcphttp   none /
+    _ib $VM_HTTP_TLS   vmess "$VMESS" tcphttp   tls  /
+    _ib $VM_SPLIT_TLS  vmess "$VMESS" splithttp tls  /split
+    _ib $VM_SPLIT_NONE vmess "$VMESS" splithttp none /split
+fi
+if [ -n "$VLESS" ]; then
+    _ib $VL_WS_TLS     vless "$VLESS" ws        tls  /vless
+    _ib $VL_WS_NONE    vless "$VLESS" ws        none /vless
+    _ib $VL_HTTP_NONE  vless "$VLESS" tcphttp   none /
+    _ib $VL_HTTP_TLS   vless "$VLESS" tcphttp   tls  /
+    _ib $VL_SPLIT_TLS  vless "$VLESS" splithttp tls  /split
+    _ib $VL_SPLIT_NONE vless "$VLESS" splithttp none /split
+fi
+if [ -n "$TROJAN" ]; then
+    _ib $TR_WS_TLS     trojan "$TROJAN" ws        tls  /trojan
+    _ib $TR_WS_NONE    trojan "$TROJAN" ws        none /trojan
+    _ib $TR_HTTP_NONE  trojan "$TROJAN" tcphttp   none /
+    _ib $TR_HTTP_TLS   trojan "$TROJAN" tcphttp   tls  /
+    _ib $TR_SPLIT_TLS  trojan "$TROJAN" splithttp tls  /split
+    _ib $TR_SPLIT_NONE trojan "$TROJAN" splithttp none /split
+fi
 
 cat > "$XCONF" <<JSON
 {
@@ -1266,8 +1285,8 @@ XACC=/etc/xray/accounts.txt
 # shared canonical scheme with auto free-port fallback and persists them to
 # /etc/xray/ports.conf; xray_paths() loads that file so links match the config.
 VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_TLS=8445; VM_SPLIT_NONE=8082
-VL_WS_TLS=8446; VL_WS_NONE=8083; VL_HTTP_NONE=8084; VL_HTTP_TLS=8447; VL_SPLIT_TLS=8448; VL_SPLIT_NONE=8085
-TR_TCP_TLS=8449; TR_WS_TLS=8450; TR_SPLIT_TLS=8451
+VL_WS_TLS=8443; VL_WS_NONE=8080; VL_HTTP_NONE=8081; VL_HTTP_TLS=8444; VL_SPLIT_TLS=8445; VL_SPLIT_NONE=8082
+TR_WS_TLS=8443; TR_WS_NONE=8080; TR_HTTP_NONE=8081; TR_HTTP_TLS=8444; TR_SPLIT_TLS=8445; TR_SPLIT_NONE=8082
 # Port-443 handover flag (when set, V2Ray owns 443 and SSL payload is off)
 XP443F=/etc/xray/port443
 STCONF=/etc/stunnel/stunnel.conf
@@ -1480,9 +1499,12 @@ show_links() {  # remark
         echo -e "  ${G}${BOLD}SPLIT TLS${NC}  ${DIM}(split · $VL_SPLIT_TLS)${NC}\n  $(mkuri vless $P_SEC $VL_SPLIT_TLS splithttp tls /split "${rk}-SPLIT-TLS")"; echo -e "$sep"
         echo -e "  ${G}${BOLD}SPLIT HTTP${NC} ${DIM}(split · $VL_SPLIT_NONE)${NC}\n  $(mkuri vless $P_SEC $VL_SPLIT_NONE splithttp none /split "${rk}-SPLIT-HTTP")"; echo -e "$sep";;
       trojan)
-        echo -e "  ${G}${BOLD}TCP TLS${NC}    ${DIM}(tcp · $TR_TCP_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_TCP_TLS tcp tls / "${rk}-TCP-TLS")"; echo -e "$sep"
-        echo -e "  ${G}${BOLD}WS TLS${NC}     ${DIM}(ws · $TR_WS_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_WS_TLS ws tls /trojan "${rk}-WS-TLS")"; echo -e "$sep"
-        echo -e "  ${G}${BOLD}SPLIT TLS${NC}  ${DIM}(split · $TR_SPLIT_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_SPLIT_TLS splithttp tls /split "${rk}-SPLIT-TLS")"; echo -e "$sep";;
+        echo -e "  ${G}${BOLD}TLS${NC}        ${DIM}(ws · $TR_WS_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_WS_TLS ws tls /trojan "${rk}-TLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}NoneTLS${NC}    ${DIM}(ws · $TR_WS_NONE)${NC}\n  $(mkuri trojan $P_SEC $TR_WS_NONE ws none /trojan "${rk}-NoneTLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}HTTP None${NC}  ${DIM}(tcp · $TR_HTTP_NONE)${NC}\n  $(mkuri trojan $P_SEC $TR_HTTP_NONE tcphttp none / "${rk}-HTTP-None")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}HTTP TLS${NC}   ${DIM}(tcp · $TR_HTTP_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_HTTP_TLS tcphttp tls / "${rk}-HTTP-TLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}SPLIT TLS${NC}  ${DIM}(split · $TR_SPLIT_TLS)${NC}\n  $(mkuri trojan $P_SEC $TR_SPLIT_TLS splithttp tls /split "${rk}-SPLIT-TLS")"; echo -e "$sep"
+        echo -e "  ${G}${BOLD}SPLIT HTTP${NC} ${DIM}(split · $TR_SPLIT_NONE)${NC}\n  $(mkuri trojan $P_SEC $TR_SPLIT_NONE splithttp none /split "${rk}-SPLIT-HTTP")"; echo -e "$sep";;
     esac
 }
 
@@ -1490,7 +1512,7 @@ xray_open_ports() {
     command -v ufw >/dev/null 2>&1 || return
     for P in $VM_WS_TLS $VM_WS_NONE $VM_HTTP_NONE $VM_HTTP_TLS $VM_SPLIT_TLS $VM_SPLIT_NONE \
              $VL_WS_TLS $VL_WS_NONE $VL_HTTP_NONE $VL_HTTP_TLS $VL_SPLIT_TLS $VL_SPLIT_NONE \
-             $TR_TCP_TLS $TR_WS_TLS $TR_SPLIT_TLS; do
+             $TR_WS_TLS $TR_WS_NONE $TR_HTTP_NONE $TR_HTTP_TLS $TR_SPLIT_TLS $TR_SPLIT_NONE; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
 }
