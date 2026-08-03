@@ -45,7 +45,7 @@ error()   { echo -e "${BRed}[✗] $*${NC}"; exit 1; }
 # line the instant it starts: the PREVIOUS step is stamped done (✔) with its
 # duration, and a slim gradient meter tracks overall progress. No spinners,
 # no sleeps — it renders as fast as the work runs.
-INSTALL_TOTAL=11; INSTALL_STEP=0; INSTALL_T0=$SECONDS
+INSTALL_TOTAL=12; INSTALL_STEP=0; INSTALL_T0=$SECONDS
 _PH_T0=$SECONDS; _PH_NAME=""
 _TW=$(tput cols 2>/dev/null || echo 72); [ "$_TW" -gt 80 ] && _TW=80; [ "$_TW" -lt 48 ] && _TW=48
 # 6-stop cool→warm gradient used to colour the meter as it fills
@@ -125,11 +125,25 @@ echo -e "  ${TEAL}╰───────────────────�
 echo ""
 read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
 DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
+echo ""
+
+# ── styled SlowDNS (NS) prompt — optional ──
+echo -e "  ${PINK}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${PINK}│${NC}  ${BWHITE}${BOLD}SLOWDNS SETUP${NC} ${GRY}(optional)${NC}                          ${PINK}│${NC}"
+echo -e "  ${PINK}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}Enter the NS host delegated to this server's IP${NC}     ${PINK}│${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}(e.g. dns.example.com). Requires an NS + A record${NC}   ${PINK}│${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}at your DNS host. Leave blank to skip SlowDNS.${NC}      ${PINK}│${NC}"
+echo -e "  ${PINK}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+read -rp "$(echo -e "   ${PINK}❯${NC} ${BWHITE}NS domain${NC} ${GRY}(blank = skip)${NC} : ")" NS_DOMAIN
+NS_DOMAIN="$(echo "$NS_DOMAIN" | tr -d '[:space:]')"
 
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
+echo "$NS_DOMAIN" > "$CONF_DIR/nsdomain.conf"
 
 # ── system info panel ──
 _OS=$( (. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME") || echo "Linux" )
@@ -141,6 +155,9 @@ if [ -n "$DOMAIN" ]; then
     printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${LIME}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "domain: $DOMAIN"
 else
     printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "self-signed (connect by IP)"
+fi
+if [ -n "$NS_DOMAIN" ]; then
+    printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${PINK}%-33.33s${NC}${GRY}│${NC}\n" "SlowDNS" "NS: $NS_DOMAIN"
 fi
 printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Steps" "$INSTALL_TOTAL install phases"
 echo -e "  ${GRY}└──────────────────────────────────────────────────────┘${NC}"
@@ -551,9 +568,10 @@ if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
+    ufw allow 53/udp >/dev/null 2>&1   # SlowDNS (dnstt) tunnel
     success "UFW rules applied"
 else
-    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447"
+    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447 + 53/udp"
 fi
 
 # ═══════════════════════════════════════════
@@ -571,6 +589,100 @@ fi
 systemctl enable vnstat >/dev/null 2>&1 || true
 systemctl restart vnstat >/dev/null 2>&1 || true
 success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
+
+# ═══════════════════════════════════════════
+# SECTION 6b2 — SLOWDNS (dnstt) — best-effort, never aborts the installer
+#   Tunnels UDP :53 -> OpenSSH 127.0.0.1:22. Whole phase runs with errexit
+#   OFF so a slow/failed apt, clone or build can never kill the install.
+# ═══════════════════════════════════════════
+phase "SlowDNS (dnstt)"
+set +e
+NS_DOMAIN=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+if [ -n "$NS_DOMAIN" ]; then
+    systemctl stop slowdns >/dev/null 2>&1
+    killall dnstt-server >/dev/null 2>&1
+
+    # --- Free UDP 53: systemd-resolved holds it and silently kills dnstt.
+    #     Disable its stub listener but keep name resolution working. ---
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
+        rm -f /etc/resolv.conf 2>/dev/null
+        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        systemctl restart systemd-resolved >/dev/null 2>&1
+    fi
+    fuser -k 53/udp >/dev/null 2>&1   # anything else squatting on :53
+
+    # --- Ensure a Go toolchain: try apt first (fast), then official tarball. ---
+    if [ ! -x /usr/local/bin/dnstt-server ]; then
+        eval "$APT git golang-go" </dev/null >/dev/null 2>&1
+        GO_BIN="$(command -v go 2>/dev/null)"
+        if [ -z "$GO_BIN" ]; then
+            ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+            case "$ARCH" in
+                amd64|x86_64)  GOA=amd64;;
+                arm64|aarch64) GOA=arm64;;
+                armhf|armv7l)  GOA=armv6l;;
+                *)             GOA=amd64;;
+            esac
+            if curl -fsSL --connect-timeout 25 -o /tmp/go.tgz \
+                 "https://go.dev/dl/go1.22.5.linux-${GOA}.tar.gz" >/dev/null 2>&1; then
+                rm -rf /usr/local/go; tar -C /usr/local -xzf /tmp/go.tgz >/dev/null 2>&1
+                rm -f /tmp/go.tgz; GO_BIN=/usr/local/go/bin/go
+            fi
+        fi
+
+        # --- Build dnstt-server from the canonical source. ---
+        if [ -x "$GO_BIN" ] || [ -n "$GO_BIN" ]; then
+            cd /root; rm -rf dnstt
+            git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+            if [ -d dnstt/dnstt-server ]; then
+                ( cd dnstt/dnstt-server \
+                  && export HOME=/root GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOFLAGS=-mod=mod \
+                  && "$GO_BIN" build -o dnstt-server >/dev/null 2>&1 \
+                  && install -m 0755 dnstt-server /usr/local/bin/dnstt-server )
+            fi
+        fi
+    fi
+
+    if [ -x /usr/local/bin/dnstt-server ]; then
+        mkdir -p /etc/slowdns
+        # generate the server keypair once; reuse on re-runs
+        if [ ! -s /etc/slowdns/server.key ] || [ ! -s /etc/slowdns/server.pub ]; then
+            ( cd /etc/slowdns && /usr/local/bin/dnstt-server -gen-key \
+                -privkey-file server.key -pubkey-file server.pub >/dev/null 2>&1 )
+        fi
+
+        cat > /etc/systemd/system/slowdns.service <<EOF
+[Unit]
+Description=SlowDNS (dnstt) Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable --now slowdns.service >/dev/null 2>&1
+        if systemctl is-active --quiet slowdns 2>/dev/null; then
+            success "SlowDNS active — UDP 53 -> OpenSSH 22 (NS: $NS_DOMAIN)"
+        else
+            warn "SlowDNS installed but not active — check: journalctl -u slowdns"
+        fi
+    else
+        warn "SlowDNS skipped — could not build dnstt-server (install continues)"
+    fi
+else
+    info "SlowDNS skipped — no NS domain provided"
+fi
+set -e   # re-enable errexit for the rest of the installer
 
 # ═══════════════════════════════════════════
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
@@ -1480,6 +1592,34 @@ xray_menu() {
     done
 }
 
+slowdns_info() {
+    section "SLOWDNS (DNSTT)" "$PINK"
+    local col="$PINK"
+    local ns pub st
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat /etc/slowdns/server.pub 2>/dev/null)
+    line_top "$col"
+    if [ -z "$ns" ] || [ ! -x /usr/local/bin/dnstt-server ]; then
+        row "$col" "${GR}SlowDNS is not installed on this server.${NC}"
+        row "$col" "${GR}Re-run the installer and enter an NS domain.${NC}"
+        line_bot "$col"; pause; return
+    fi
+    if systemctl is-active --quiet slowdns 2>/dev/null; then
+        st="${G}● running${NC}"; else st="${R}○ stopped${NC}"; fi
+    row "$col" "${GR}Status${NC}    $st"
+    row "$col" "${GR}NS domain${NC} ${W}${ns}${NC}"
+    row "$col" "${GR}Backend${NC}   ${W}127.0.0.1:22 (OpenSSH)${NC}"
+    row "$col" "${GR}Server IP${NC} ${W}${SERVER_IP}${NC}"
+    line_mid "$col"
+    row "$col" "${GR}Public key${NC}"
+    row "$col" "${W}${pub}${NC}"
+    line_bot "$col"
+    echo ""
+    echo -e "  ${GR}Client: use NS '${W}${ns}${GR}', the public key above, and any${NC}"
+    echo -e "  ${GR}SlowDNS-capable app (SSH account = your normal users).${NC}"
+    pause
+}
+
 menu_item() {  # menu_item NUM ICON "Label" color
     echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
 }
@@ -1498,6 +1638,7 @@ while true; do
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
+    menu_item "11" "🐌" "SlowDNS info"            "$PINK"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1512,6 +1653,7 @@ while true; do
         8) bandwidth ;;
         9) xray_menu ;;
         10) restart_services ;;
+        11) slowdns_info ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac

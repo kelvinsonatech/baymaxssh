@@ -1,0 +1,80 @@
+<CORRECTED-SLOWDNS-INSTALLER-WORKING>
+```bash
+#!/bin/bash
+# Corrected SlowDNS Installer – Actually Works
+# Usage: bash slowdns_fixed.shMYIP=$(wget -qO- ipv4.icanhazip.com)
+clear
+echo -e "\e[1;33m==========================================\e[0m"
+echo -e "\e[1;32m     SLOWDNS INSTALLER (FIXED)            \e[0m"
+echo -e "\e[1;33m==========================================\e[0m"
+
+Ask for the NS domain – the base domain you control
+
+read -p "Enter your NS domain (e.g., dns.my-tunnel.com): " NS_DOMAIN
+if [[ -z "$NS_DOMAIN" ]]; then
+echo "ERROR: NS domain is required. Set an A record for this domain pointing to $MYIP first."
+exit 1
+fi
+
+1. Install dependencies
+
+echo -e "\n\e[1;33m[1/4] Installing Go & Git...\e[0m"
+apt-get update -y >/dev/null 2>&1
+apt-get install -y golang-go git >/dev/null 2>&1
+
+2. Compile dnstt-server
+
+echo -e "\e[1;33m[2/4] Compiling DNSTT server from source...\e[0m"
+cd /root
+rm -rf dnstt
+git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+cd dnstt/dnstt-server
+go build -o dnstt-server main.go
+chmod +x dnstt-server
+mv dnstt-server /usr/local/bin/dnstt-server
+
+3. Generate keys
+
+echo -e "\e[1;33m[3/4] Generating server keys...\e[0m"
+mkdir -p /etc/slowdns
+cd /etc/slowdns
+dnstt-server -gen-key -privkey-file server.key -pubkey-file server.pub
+PUBKEY=$(cat server.pub)
+
+4. Create systemd service (using NS_DOMAIN, not the public key!)
+
+echo -e "\e[1;33m[4/4] Creating service with domain $NS_DOMAIN...\e[0m"
+cat > /etc/systemd/system/slowdns.service <<EOF
+[Unit]
+Description=SlowDNS Tunnel Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key $NS_DOMAIN 127.0.0.1:22
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now slowdns.service
+
+Firewall
+
+ufw allow 53/udp >/dev/null 2>&1
+
+clear
+echo -e "\e[1;32m==========================================\e[0m"
+echo -e "\e[1;36m     SLOWDNS IS ALIVE                      \e[0m"
+echo -e "\e[1;32m==========================================\e[0m"
+echo -e "Server IP     : $MYIP"
+echo -e "NS Domain     : $NS_DOMAIN"
+echo -e "Public Key    : $PUBKEY"
+echo -e ""
+echo -e "Client config:"
+echo -e "  Use NS Domain: PUBKEY.NS_DOMAIN"
+echo -e "  DNS Server   : $MYIP (or any resolver if NS delegation is set)"
+echo -e "\e[1;33mMake sure $NS_DOMAIN has an A record pointing to $MYIP\e[0m"
+echo -e "\e[1;32m==========================================\e[0m"
