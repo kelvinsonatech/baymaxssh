@@ -718,13 +718,15 @@ C_WS_TLS=2083; C_WS_NONE=8080; C_HTTP_NONE=2082; C_HTTP_TLS=2087; C_SPLIT_TLS=20
 # ignored, so regenerating the config never makes the ports drift on re-runs).
 _busy=" $(ss -ltnpH 2>/dev/null | grep -v '"xray"' | awk '{print $4}' | sed 's/.*://' | sort -un | tr '\n' ' ') "
 _used=" $XAPI 22 80 109 143 443 447 53 "   # reserved for SSH/SSL/SlowDNS/API
-_alloc() {   # $1 = preferred port; echoes the first free port and reserves it
+_alloc() {   # $1 = preferred port, $2 = variable name to set with the free port.
+    # NOTE: sets a variable rather than echoing — command substitution runs in a
+    # subshell, which would discard the running $_used reservation between calls.
     local p="$1"
     while :; do
         case "$_used$_busy" in *" $p "*) p=$((p+1)); continue;; esac
         break
     done
-    _used="$_used$p "; printf '%s' "$p"
+    _used="$_used$p "; eval "$2=$p"
 }
 
 mkdir -p /etc/xray /usr/local/etc/xray; touch "$XACC"
@@ -750,22 +752,35 @@ while IFS='|' read -r f1 f2 f3 f4 f5; do
     esac
 done < "$XACC"
 
+# A protocol is ACTIVE (gets real ports + inbounds) if it has accounts OR it was
+# handed port 443 — otherwise the 443 listener would never bind and the handover
+# fails. Read the 443 flag now so it feeds both port assignment and emission.
+P443=$(cat /etc/xray/port443 2>/dev/null)
+ACTIVE=""
+[ -n "$VMESS" ]  && ACTIVE="$ACTIVE vmess"
+[ -n "$VLESS" ]  && ACTIVE="$ACTIVE vless"
+[ -n "$TROJAN" ] && ACTIVE="$ACTIVE trojan"
+case "$P443" in vmess|vless|trojan)
+    case " $ACTIVE " in *" $P443 "*) :;; *) ACTIVE="$ACTIVE $P443";; esac ;;
+esac
+_active() { case " $ACTIVE " in *" $1 "*) return 0;; esac; return 1; }
+
 # Default every protocol to the canonical numbers (used only for display when a
-# protocol has no accounts yet), then hand the real free ports to the protocols
-# that ARE in use, in priority order.
+# protocol has no accounts yet), then hand the real free ports to the ACTIVE
+# protocols, in priority order (so ports never collide across protocols).
 for _pfx in VM VL TR; do
     eval "${_pfx}_WS_TLS=$C_WS_TLS;     ${_pfx}_WS_NONE=$C_WS_NONE"
     eval "${_pfx}_HTTP_NONE=$C_HTTP_NONE; ${_pfx}_HTTP_TLS=$C_HTTP_TLS"
     eval "${_pfx}_SPLIT_TLS=$C_SPLIT_TLS; ${_pfx}_SPLIT_NONE=$C_SPLIT_NONE"
 done
 _assign() {   # $1 = prefix (VM/VL/TR): give this protocol the canonical scheme
-    eval "$1_WS_TLS=\$(_alloc \$C_WS_TLS)";       eval "$1_WS_NONE=\$(_alloc \$C_WS_NONE)"
-    eval "$1_HTTP_NONE=\$(_alloc \$C_HTTP_NONE)"; eval "$1_HTTP_TLS=\$(_alloc \$C_HTTP_TLS)"
-    eval "$1_SPLIT_TLS=\$(_alloc \$C_SPLIT_TLS)"; eval "$1_SPLIT_NONE=\$(_alloc \$C_SPLIT_NONE)"
+    _alloc $C_WS_TLS    ${1}_WS_TLS;    _alloc $C_WS_NONE   ${1}_WS_NONE
+    _alloc $C_HTTP_NONE ${1}_HTTP_NONE; _alloc $C_HTTP_TLS  ${1}_HTTP_TLS
+    _alloc $C_SPLIT_TLS ${1}_SPLIT_TLS; _alloc $C_SPLIT_NONE ${1}_SPLIT_NONE
 }
-[ -n "$VMESS" ]  && _assign VM
-[ -n "$VLESS" ]  && _assign VL
-[ -n "$TROJAN" ] && _assign TR
+_active vmess  && _assign VM
+_active vless  && _assign VL
+_active trojan && _assign TR
 
 # Persist resolved ports so the menu's link/QR display matches the live config
 # (written BEFORE the 443 handover so the base numbers are stable).
@@ -776,8 +791,7 @@ TR_WS_TLS=$TR_WS_TLS; TR_WS_NONE=$TR_WS_NONE; TR_HTTP_NONE=$TR_HTTP_NONE; TR_HTT
 PORTS
 
 # If the operator handed port 443 to V2Ray (SSL payload disabled), move that
-# protocol's WS-TLS listener onto 443.
-P443=$(cat /etc/xray/port443 2>/dev/null)
+# protocol's WS-TLS listener onto 443 (P443 was read above).
 case "$P443" in
     vmess)  VM_WS_TLS=443;;
     vless)  VL_WS_TLS=443;;
@@ -818,9 +832,12 @@ ib() {
 
 INB="{\"listen\":\"127.0.0.1\",\"port\":$XAPI,\"protocol\":\"dokodemo-door\",\"settings\":{\"address\":\"127.0.0.1\"},\"tag\":\"api\"}"
 _ib() { INB="$INB,$(ib "$@")"; }
-# Only protocols WITH accounts get inbounds, so unused protocols never occupy
-# the shared canonical ports. All three use the SAME 6-variant lineup.
-if [ -n "$VMESS" ]; then
+# Only ACTIVE protocols get inbounds (has accounts, or was handed port 443), so
+# unused protocols never occupy the shared canonical ports. A protocol handed
+# 443 with no accounts yet still binds (empty client list) so the handover
+# succeeds; create an account afterwards to actually use it. All three use the
+# SAME 6-variant lineup.
+if _active vmess; then
     _ib $VM_WS_TLS     vmess "$VMESS" ws        tls  /vmess
     _ib $VM_WS_NONE    vmess "$VMESS" ws        none /vmess
     _ib $VM_HTTP_NONE  vmess "$VMESS" tcphttp   none /
@@ -828,7 +845,7 @@ if [ -n "$VMESS" ]; then
     _ib $VM_SPLIT_TLS  vmess "$VMESS" splithttp tls  /split
     _ib $VM_SPLIT_NONE vmess "$VMESS" splithttp none /split
 fi
-if [ -n "$VLESS" ]; then
+if _active vless; then
     _ib $VL_WS_TLS     vless "$VLESS" ws        tls  /vless
     _ib $VL_WS_NONE    vless "$VLESS" ws        none /vless
     _ib $VL_HTTP_NONE  vless "$VLESS" tcphttp   none /
@@ -836,7 +853,7 @@ if [ -n "$VLESS" ]; then
     _ib $VL_SPLIT_TLS  vless "$VLESS" splithttp tls  /split
     _ib $VL_SPLIT_NONE vless "$VLESS" splithttp none /split
 fi
-if [ -n "$TROJAN" ]; then
+if _active trojan; then
     _ib $TR_WS_TLS     trojan "$TROJAN" ws        tls  /trojan
     _ib $TR_WS_NONE    trojan "$TROJAN" ws        none /trojan
     _ib $TR_HTTP_NONE  trojan "$TROJAN" tcphttp   none /
