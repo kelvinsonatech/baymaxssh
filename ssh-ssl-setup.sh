@@ -349,6 +349,13 @@ func handle(client net.Conn) {
 		}
 	}
 
+	// Some injector payloads send "Expect: 100-continue" and wait for a
+	// provisional reply before finishing the request. Answer it so those
+	// clients proceed; harmless for clients that don't expect it.
+	if bytes.Contains(bytes.ToLower(buf), []byte("100-continue")) {
+		client.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+	}
+
 	if _, err := client.Write(response); err != nil {
 		client.Close()
 		backend.Close()
@@ -442,6 +449,11 @@ def handle(c):
     except Exception: pass
     finally:
         try: c.settimeout(None)
+        except Exception: pass
+    # Honor "Expect: 100-continue" so injector apps that wait for a provisional
+    # reply before finishing the request proceed; harmless otherwise.
+    if b"100-continue" in buf.lower():
+        try: c.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
         except Exception: pass
     try: c.sendall(RESP)
     except Exception: c.close(); b.close(); return
