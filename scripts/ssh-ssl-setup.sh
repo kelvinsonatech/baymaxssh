@@ -361,7 +361,31 @@ func handle(client net.Conn) {
 		backend.Close()
 		return
 	}
-	bridge(client, backend, nil)
+
+	// A payload may send SEVERAL HTTP blocks (e.g. a second CONNECT line, or a
+	// body it only sends after the 100/101 reply) before the real SSH stream.
+	// Forwarding that junk to SSH corrupts the handshake, so strip everything up
+	// to the "SSH-" banner — the first bytes every SSH client sends. Whatever
+	// precedes it is discarded; from "SSH-" onward is real SSH.
+	idx := bytes.Index(buf, []byte("SSH-"))
+	deadline := time.Now().Add(peekTimeout)
+	for idx < 0 && len(buf) < 16384 && time.Now().Before(deadline) {
+		client.SetReadDeadline(time.Now().Add(peekTimeout))
+		m, e := client.Read(first)
+		client.SetReadDeadline(time.Time{})
+		if m > 0 {
+			buf = append(buf, first[:m]...)
+			idx = bytes.Index(buf, []byte("SSH-"))
+		}
+		if e != nil {
+			break
+		}
+	}
+	var prefix []byte
+	if idx >= 0 {
+		prefix = buf[idx:] // forward from the SSH banner onward
+	}
+	bridge(client, backend, prefix)
 }
 
 func main() {
@@ -457,7 +481,24 @@ def handle(c):
         except Exception: pass
     try: c.sendall(RESP)
     except Exception: c.close(); b.close(); return
-    try: bridge(c,b)
+    # A payload may send more HTTP blocks (a second CONNECT line, or a body sent
+    # only after the 100/101 reply) before the real SSH stream. Forwarding that
+    # junk corrupts the SSH handshake, so strip everything up to the "SSH-"
+    # banner (the first bytes every SSH client sends) and forward from there.
+    idx=buf.find(b"SSH-")
+    import time as _t; _dl=_t.time()+T
+    try:
+        c.settimeout(T)
+        while idx<0 and len(buf)<16384 and _t.time()<_dl:
+            m=c.recv(4096)
+            if not m: break
+            buf+=m; idx=buf.find(b"SSH-")
+    except Exception: pass
+    finally:
+        try: c.settimeout(None)
+        except Exception: pass
+    pre=buf[idx:] if idx>=0 else b""
+    try: bridge(c,b,pre)
     finally: c.close(); b.close()
 def main():
     s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
