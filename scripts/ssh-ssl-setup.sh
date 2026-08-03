@@ -709,10 +709,10 @@ XAPI=10085
 # VMess, VLESS and Trojan all use the SAME standard ports. Two inbounds can
 # never bind one TCP port at once, so the canonical ports are handed to the
 # protocols that actually HAVE ACCOUNTS, in priority order (VMess, then VLESS,
-# then Trojan). So if you only use Trojan, Trojan gets the standard VMess ports
-# (8443 WS-TLS, 8080 WS, 8081 HTTP, 8444 HTTP-TLS, 8445/8082 split). When more
-# than one protocol is in use, the later ones roll up to the next free ports.
-C_WS_TLS=8443; C_WS_NONE=8080; C_HTTP_NONE=8081; C_HTTP_TLS=8444; C_SPLIT_TLS=8445; C_SPLIT_NONE=8082
+# then Trojan). So if you only use Trojan, Trojan gets the standard VMess ports.
+# Ports are Cloudflare-supported: TLS on 2083/2087/2096, plain HTTP on
+# 8080/2082/2095 (443 itself stays reserved for the SSL payload / 443 handover).
+C_WS_TLS=2083; C_WS_NONE=8080; C_HTTP_NONE=2082; C_HTTP_TLS=2087; C_SPLIT_TLS=2096; C_SPLIT_NONE=2095
 
 # Ports held by processes OTHER than xray (xray's own current listeners are
 # ignored, so regenerating the config never makes the ports drift on re-runs).
@@ -1284,9 +1284,9 @@ XACC=/etc/xray/accounts.txt
 # Default ports (fallback). The config generator resolves the real ports from a
 # shared canonical scheme with auto free-port fallback and persists them to
 # /etc/xray/ports.conf; xray_paths() loads that file so links match the config.
-VM_WS_TLS=8443; VM_WS_NONE=8080; VM_HTTP_NONE=8081; VM_HTTP_TLS=8444; VM_SPLIT_TLS=8445; VM_SPLIT_NONE=8082
-VL_WS_TLS=8443; VL_WS_NONE=8080; VL_HTTP_NONE=8081; VL_HTTP_TLS=8444; VL_SPLIT_TLS=8445; VL_SPLIT_NONE=8082
-TR_WS_TLS=8443; TR_WS_NONE=8080; TR_HTTP_NONE=8081; TR_HTTP_TLS=8444; TR_SPLIT_TLS=8445; TR_SPLIT_NONE=8082
+VM_WS_TLS=2083; VM_WS_NONE=8080; VM_HTTP_NONE=2082; VM_HTTP_TLS=2087; VM_SPLIT_TLS=2096; VM_SPLIT_NONE=2095
+VL_WS_TLS=2083; VL_WS_NONE=8080; VL_HTTP_NONE=2082; VL_HTTP_TLS=2087; VL_SPLIT_TLS=2096; VL_SPLIT_NONE=2095
+TR_WS_TLS=2083; TR_WS_NONE=8080; TR_HTTP_NONE=2082; TR_HTTP_TLS=2087; TR_SPLIT_TLS=2096; TR_SPLIT_NONE=2095
 # Port-443 handover flag (when set, V2Ray owns 443 and SSL payload is off)
 XP443F=/etc/xray/port443
 STCONF=/etc/stunnel/stunnel.conf
