@@ -1068,6 +1068,21 @@ create_user() {
     row "$col2" "${DIM}Upgrade: websocket[crlf][crlf]${NC}"
     row "$col2" "${GR}SSL / SNI host${NC}  ${W}${HOST_DISPLAY}${NC}"
     line_bot "$col2"
+
+    # --- SlowDNS details (only when installed) ---
+    local ns pub
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat /etc/slowdns/server.pub 2>/dev/null)
+    if [ -n "$ns" ] && [ -x /usr/local/bin/dnstt-server ] && [ -n "$pub" ]; then
+        local col3="$PINK"
+        line_top "$col3"; crow "$col3" "${W}${BOLD}SLOWDNS (DNSTT)${NC}"; line_mid "$col3"
+        row "$col3" "${GR}NS domain${NC}  ${W}${ns}${NC}"
+        row "$col3" "${GR}Server IP${NC}  ${W}${SERVER_IP}${NC}"
+        row "$col3" "${GR}Public key${NC}"
+        row "$col3" "${W}${pub}${NC}"
+        line_bot "$col3"
+        echo -e "  ${GR}Use the same username/password above with a SlowDNS app.${NC}"
+    fi
     pause
 }
 
