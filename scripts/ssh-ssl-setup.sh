@@ -613,11 +613,30 @@ if [ -n "$NS_DOMAIN" ]; then
     fi
     fuser -k 53/udp >/dev/null 2>&1   # anything else squatting on :53
 
-    # --- Ensure a Go toolchain: try apt first (fast), then official tarball. ---
+    # --- Build dnstt-server. dnstt needs a modern Go (>=1.21); apt often ships
+    #     one too old (Debian 11=1.15, 12=1.19), so we try the toolchain on PATH
+    #     first and, if the build fails, install the official go.dev tarball and
+    #     retry. A helper does one build attempt with a given `go` binary. ---
     if [ ! -x /usr/local/bin/dnstt-server ]; then
-        eval "$APT git golang-go" </dev/null >/dev/null 2>&1
-        GO_BIN="$(command -v go 2>/dev/null)"
-        if [ -z "$GO_BIN" ]; then
+        eval "$APT git golang-go ca-certificates" </dev/null >/dev/null 2>&1
+        cd /root; rm -rf dnstt
+        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+
+        _try_build() {   # $1 = path to a go binary
+            [ -x "$1" ] || command -v "$1" >/dev/null 2>&1 || return 1
+            [ -d /root/dnstt/dnstt-server ] || return 1
+            ( cd /root/dnstt/dnstt-server \
+              && export HOME=/root GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOFLAGS=-mod=mod \
+              && "$1" build -o dnstt-server . >/dev/null 2>&1 \
+              && install -m 0755 dnstt-server /usr/local/bin/dnstt-server )
+        }
+
+        # 1) try whatever `go` apt gave us (fast path on modern distros)
+        APT_GO="$(command -v go 2>/dev/null)"
+        [ -n "$APT_GO" ] && _try_build "$APT_GO"
+
+        # 2) if that didn't produce a binary, fetch modern Go and retry
+        if [ ! -x /usr/local/bin/dnstt-server ]; then
             ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
             case "$ARCH" in
                 amd64|x86_64)  GOA=amd64;;
@@ -628,19 +647,8 @@ if [ -n "$NS_DOMAIN" ]; then
             if curl -fsSL --connect-timeout 25 -o /tmp/go.tgz \
                  "https://go.dev/dl/go1.22.5.linux-${GOA}.tar.gz" >/dev/null 2>&1; then
                 rm -rf /usr/local/go; tar -C /usr/local -xzf /tmp/go.tgz >/dev/null 2>&1
-                rm -f /tmp/go.tgz; GO_BIN=/usr/local/go/bin/go
-            fi
-        fi
-
-        # --- Build dnstt-server from the canonical source. ---
-        if [ -x "$GO_BIN" ] || [ -n "$GO_BIN" ]; then
-            cd /root; rm -rf dnstt
-            git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
-            if [ -d dnstt/dnstt-server ]; then
-                ( cd dnstt/dnstt-server \
-                  && export HOME=/root GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOFLAGS=-mod=mod \
-                  && "$GO_BIN" build -o dnstt-server >/dev/null 2>&1 \
-                  && install -m 0755 dnstt-server /usr/local/bin/dnstt-server )
+                rm -f /tmp/go.tgz
+                _try_build /usr/local/go/bin/go
             fi
         fi
     fi
