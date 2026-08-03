@@ -349,12 +349,43 @@ func handle(client net.Conn) {
 		}
 	}
 
+	// Some injector payloads send "Expect: 100-continue" and wait for a
+	// provisional reply before finishing the request. Answer it so those
+	// clients proceed; harmless for clients that don't expect it.
+	if bytes.Contains(bytes.ToLower(buf), []byte("100-continue")) {
+		client.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+	}
+
 	if _, err := client.Write(response); err != nil {
 		client.Close()
 		backend.Close()
 		return
 	}
-	bridge(client, backend, nil)
+
+	// A payload may send SEVERAL HTTP blocks (e.g. a second CONNECT line, or a
+	// body it only sends after the 100/101 reply) before the real SSH stream.
+	// Forwarding that junk to SSH corrupts the handshake, so strip everything up
+	// to the "SSH-" banner — the first bytes every SSH client sends. Whatever
+	// precedes it is discarded; from "SSH-" onward is real SSH.
+	idx := bytes.Index(buf, []byte("SSH-"))
+	deadline := time.Now().Add(peekTimeout)
+	for idx < 0 && len(buf) < 16384 && time.Now().Before(deadline) {
+		client.SetReadDeadline(time.Now().Add(peekTimeout))
+		m, e := client.Read(first)
+		client.SetReadDeadline(time.Time{})
+		if m > 0 {
+			buf = append(buf, first[:m]...)
+			idx = bytes.Index(buf, []byte("SSH-"))
+		}
+		if e != nil {
+			break
+		}
+	}
+	var prefix []byte
+	if idx >= 0 {
+		prefix = buf[idx:] // forward from the SSH banner onward
+	}
+	bridge(client, backend, prefix)
 }
 
 func main() {
@@ -443,9 +474,31 @@ def handle(c):
     finally:
         try: c.settimeout(None)
         except Exception: pass
+    # Honor "Expect: 100-continue" so injector apps that wait for a provisional
+    # reply before finishing the request proceed; harmless otherwise.
+    if b"100-continue" in buf.lower():
+        try: c.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+        except Exception: pass
     try: c.sendall(RESP)
     except Exception: c.close(); b.close(); return
-    try: bridge(c,b)
+    # A payload may send more HTTP blocks (a second CONNECT line, or a body sent
+    # only after the 100/101 reply) before the real SSH stream. Forwarding that
+    # junk corrupts the SSH handshake, so strip everything up to the "SSH-"
+    # banner (the first bytes every SSH client sends) and forward from there.
+    idx=buf.find(b"SSH-")
+    import time as _t; _dl=_t.time()+T
+    try:
+        c.settimeout(T)
+        while idx<0 and len(buf)<16384 and _t.time()<_dl:
+            m=c.recv(4096)
+            if not m: break
+            buf+=m; idx=buf.find(b"SSH-")
+    except Exception: pass
+    finally:
+        try: c.settimeout(None)
+        except Exception: pass
+    pre=buf[idx:] if idx>=0 else b""
+    try: bridge(c,b,pre)
     finally: c.close(); b.close()
 def main():
     s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
