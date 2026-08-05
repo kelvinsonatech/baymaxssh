@@ -46,3 +46,12 @@ verifying PUBIP is actually a local address (`ip -o addr | grep -w`), else skip
 the filter. Always restore the original unit and verify slowdns is-active on any
 failure; warn loudly if it doesn't come back. See slowdns-udp53.md for the base
 :53 constraint.
+
+**Self-test enforcement lesson:** the self-test can show dnsmasq working while
+the iptables enforcement rules (OUTPUT port-53 redirect, DoH/DoT blocks) are
+missing — this happens when the user updates the script but doesn't re-run the
+enable toggle, or when iptables isn't in PATH on the target VPS. Fix pattern:
+enable must export sbin PATH / auto-install iptables, and after any installer
+update the user should toggle the module off/on to reapply rules. Verified
+passing end-to-end on the user's VPS (1.6M-domain blocklist, redirect + DoH
+blocks all [ok]).
