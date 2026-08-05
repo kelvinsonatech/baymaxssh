@@ -22,8 +22,12 @@ otherwise just reload without the guard's config and restore prior state.
 **Why:** blindly stopping/disabling dnsmasq or fail2ban on disable clobbers a
 setup the operator already relied on.
 
-**DNS filter is server-side only (resolv.conf -> 127.0.0.1), never a client
-hijack** (enforce_dns was declined). Fallback `nameserver 1.1.1.1` so DNS
+**DNS filter now ENFORCES client DNS too** (user reversed the earlier
+server-side-only choice after bypass tests): nat OUTPUT redirects all port-53
+lookups into dnsmasq (owner-exempt the dnsmasq uid or lookups loop), and known
+DoT/DoH resolver endpoints are rejected (ESTABLISHED-return first for zero
+cost). v6 DNS is rejected so clients fall back to v4. Boot unit must order
+After=dnsmasq.service or enforcement is silently skipped on reboot. Fallback `nameserver 1.1.1.1` so DNS
 survives if dnsmasq dies; blocked domains answer 0.0.0.0 instantly so no
 fallthrough. Restore resolv.conf FIRST in teardown.
 

@@ -698,6 +698,64 @@ _fw_remove() {   # $1 = iptables | ip6tables
 apply_fw()  { _fw_build iptables;  _fw_build ip6tables; }
 remove_fw() { _fw_remove iptables; _fw_remove ip6tables; }
 
+# ---------- DNS enforcement (closes client-side bypasses) ----------
+# Clients can dodge a server-side filter by resolving names themselves:
+# hard-coded 8.8.8.8 in the app, or encrypted DNS (DoH/DoT) in the browser.
+# When the content filter is active we (a) transparently redirect any
+# tunnel-originated port-53 lookup into the local filter — the app still
+# "talks to 8.8.8.8" but gets filtered answers — and (b) block the known
+# encrypted-DNS side doors. NAT only sees the first packet of a connection
+# and the filter chain RETURNs on ESTABLISHED first, so speed is untouched.
+DOH_IPS="1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 9.9.9.9 149.112.112.112 94.140.14.14 94.140.15.15 208.67.222.222 208.67.220.220"
+apply_dnsforce() {
+    systemctl is-active --quiet dnsmasq 2>/dev/null || return 0
+    # v4: redirect all locally-originated DNS into dnsmasq (127.0.0.1:53).
+    iptables -t nat -N ABUSE_DNS 2>/dev/null; iptables -t nat -F ABUSE_DNS
+    # dnsmasq's own upstream queries must pass, or lookups would loop.
+    iptables -t nat -A ABUSE_DNS -m owner --uid-owner dnsmasq -j RETURN 2>/dev/null
+    iptables -t nat -A ABUSE_DNS -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A ABUSE_DNS -p udp --dport 53 -j REDIRECT --to-ports 53
+    iptables -t nat -A ABUSE_DNS -p tcp --dport 53 -j REDIRECT --to-ports 53
+    iptables -t nat -C OUTPUT -j ABUSE_DNS 2>/dev/null || iptables -t nat -A OUTPUT -j ABUSE_DNS
+    # Encrypted-DNS side doors: DoT (853) + HTTPS to well-known DoH resolver
+    # IPs (those addresses serve DNS only, so nothing legitimate breaks).
+    iptables -N ABUSE_DOH 2>/dev/null; iptables -F ABUSE_DOH
+    iptables -A ABUSE_DOH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    iptables -A ABUSE_DOH -p tcp --dport 853 -j REJECT --reject-with tcp-reset
+    iptables -A ABUSE_DOH -p udp --dport 853 -j DROP
+    local ip
+    for ip in $DOH_IPS; do
+        iptables -A ABUSE_DOH -d "$ip" -p tcp --dport 443 -j REJECT --reject-with tcp-reset
+        iptables -A ABUSE_DOH -d "$ip" -p udp --dport 443 -j DROP
+    done
+    iptables -C OUTPUT -j ABUSE_DOH 2>/dev/null || iptables -I OUTPUT -j ABUSE_DOH
+    # v6: dnsmasq listens on v4 loopback only, so v6 DNS can't be redirected —
+    # reject it instead; clients fall back to v4, which lands in the filter.
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -N ABUSE_DOH 2>/dev/null; ip6tables -F ABUSE_DOH
+        ip6tables -A ABUSE_DOH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+        ip6tables -A ABUSE_DOH -o lo -j RETURN
+        ip6tables -A ABUSE_DOH -p udp --dport 53 -j REJECT 2>/dev/null
+        ip6tables -A ABUSE_DOH -p tcp --dport 53 -j REJECT --reject-with tcp-reset
+        ip6tables -A ABUSE_DOH -p tcp --dport 853 -j REJECT --reject-with tcp-reset
+        ip6tables -A ABUSE_DOH -p udp --dport 853 -j DROP
+        ip6tables -C OUTPUT -j ABUSE_DOH 2>/dev/null || ip6tables -I OUTPUT -j ABUSE_DOH
+    fi
+}
+remove_dnsforce() {
+    iptables -t nat -D OUTPUT -j ABUSE_DNS 2>/dev/null
+    iptables -t nat -F ABUSE_DNS 2>/dev/null
+    iptables -t nat -X ABUSE_DNS 2>/dev/null
+    iptables -D OUTPUT -j ABUSE_DOH 2>/dev/null
+    iptables -F ABUSE_DOH 2>/dev/null
+    iptables -X ABUSE_DOH 2>/dev/null
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -D OUTPUT -j ABUSE_DOH 2>/dev/null
+        ip6tables -F ABUSE_DOH 2>/dev/null
+        ip6tables -X ABUSE_DOH 2>/dev/null
+    fi
+}
+
 # ---------- brute-force shield (fail2ban) ----------
 setup_f2b() {
     # Record whether fail2ban pre-existed, so disable can restore its state
@@ -766,16 +824,50 @@ teardown_f2b() {
 
 # ---------- content filter (dnsmasq, server-side, no client hijack) ----------
 fetch_blocklist() {
-    local url="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-gambling/hosts"
-    local alt="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts"
-    local tmp; tmp=$(mktemp)
-    if curl -fsSL "$url" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-        grep -E '^0\.0\.0\.0 ' "$tmp" > "$BLOCK_HOSTS"
-    elif curl -fsSL "$alt" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-        grep -E '^0\.0\.0\.0 ' "$tmp" > "$BLOCK_HOSTS"
-    elif [ ! -s "$BLOCK_HOSTS" ]; then
-        : > "$BLOCK_HOSTS"
+    # Aggregate the big maintained world databases per category:
+    #   porn      — StevenBlack, Blocklist Project, Sinfonietta
+    #   betting   — StevenBlack, Blocklist Project, Sinfonietta
+    #   torrents  — Blocklist Project (tracker/index sites; complements port block)
+    #   carding   — Blocklist Project fraud + scam feeds
+    # All hosts-format feeds; merged, normalized and deduplicated. If every
+    # fetch fails, the previous blocklist is kept untouched.
+    local urls="
+https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-gambling/hosts
+https://raw.githubusercontent.com/blocklistproject/Lists/master/porn.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/gambling.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/torrent.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/fraud.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
+https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/pornography-hosts
+https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/gambling-hosts
+"
+    local tmp raw u ok=0
+    tmp=$(mktemp); raw=$(mktemp)
+    for u in $urls; do
+        if curl -fsSL --max-time 180 "$u" -o "$raw" 2>/dev/null && [ -s "$raw" ]; then
+            cat "$raw" >> "$tmp"; echo >> "$tmp"; ok=1
+        else
+            echo "  blocklist: could not fetch $u (skipped)"
+        fi
+    done
+    rm -f "$raw"
+    if [ "$ok" = 1 ]; then
+        # Accept "0.0.0.0 dom" / "127.0.0.1 dom" / bare-domain lines; drop
+        # comments and junk; lowercase; dedupe; emit dnsmasq hosts format.
+        awk '{ sub(/\r$/,"") }
+             /^[[:space:]]*(#|$)/ { next }
+             { d=$1
+               if (d=="0.0.0.0" || d=="127.0.0.1") d=$2
+               d=tolower(d)
+               if (d ~ /^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$/ && d != "localhost")
+                   print d }' "$tmp" | sort -u | sed 's/^/0.0.0.0 /' > "${BLOCK_HOSTS}.new"
+        if [ -s "${BLOCK_HOSTS}.new" ]; then
+            mv -f "${BLOCK_HOSTS}.new" "$BLOCK_HOSTS"
+        else
+            rm -f "${BLOCK_HOSTS}.new"
+        fi
     fi
+    [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
     rm -f "$tmp"
 }
 restore_slowdns() {
@@ -839,8 +931,11 @@ DNSEOF
     # dnsmasq is down, so blocking still holds while it runs.
     [ -f "$RESOLV_BAK" ] || cp -f /etc/resolv.conf "$RESOLV_BAK" 2>/dev/null
     printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\noptions timeout:2 attempts:1\n' > /etc/resolv.conf
+    # Close the client-side bypasses (hard-coded 8.8.8.8, DoH/DoT).
+    apply_dnsforce
 }
 teardown_dns() {
+    remove_dnsforce
     rm -f /etc/dnsmasq.d/abuse-guard.conf
     # Restore resolv.conf FIRST so name resolution never depends on our resolver.
     [ -f "$RESOLV_BAK" ] && { cp -f "$RESOLV_BAK" /etc/resolv.conf; rm -f "$RESOLV_BAK"; }
@@ -885,8 +980,11 @@ case "$1" in
     refresh)
         fetch_blocklist; systemctl restart dnsmasq >/dev/null 2>&1
         echo "Blocklist refreshed ($(grep -c . "$BLOCK_HOSTS" 2>/dev/null) domains)." ;;
-    apply-fw)   # boot-time re-apply (firewall only; other modules self-persist)
-        [ -f "$FLAG" ] && apply_fw ;;
+    apply-fw)   # boot-time re-apply (firewall + DNS enforcement; rest self-persists)
+        if [ -f "$FLAG" ]; then
+            apply_fw
+            [ -f /etc/dnsmasq.d/abuse-guard.conf ] && apply_dnsforce
+        fi ;;
     status|"")  status ;;
     *) echo "usage: abuse-guard {enable|disable|refresh|status}";;
 esac
@@ -896,7 +994,7 @@ chmod +x /usr/local/bin/abuse-guard
 cat > /etc/systemd/system/abuse-guard.service <<'EOF'
 [Unit]
 Description=Re-apply abuse-guard egress firewall on boot
-After=network-online.target
+After=network-online.target dnsmasq.service
 Wants=network-online.target
 
 [Service]
