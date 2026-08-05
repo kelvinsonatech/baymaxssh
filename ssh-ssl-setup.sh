@@ -676,12 +676,14 @@ _fw_build() {   # $1 = iptables | ip6tables
     "$ipt" -A $CHAIN -p udp --dport 53 -j RETURN
     "$ipt" -A $CHAIN -p tcp --dport 53 -j RETURN
     # DDoS/scan/brute: cap NEW connections to a SINGLE destination, while the
-    # bandwidth of established flows stays fully intact (balanced limits).
+    # bandwidth of established flows stays fully intact. Limits are deliberately
+    # high (500/s, burst 1000) so many users sharing one CDN/API IP are never
+    # clipped — only genuine floods (thousands/sec) are dropped.
     "$ipt" -A $CHAIN -p tcp --syn -m hashlimit --hashlimit-name ag_syn \
-        --hashlimit-mode dstip --hashlimit-above 200/sec --hashlimit-burst 400 \
+        --hashlimit-mode dstip --hashlimit-above 500/sec --hashlimit-burst 1000 \
         --hashlimit-htable-expire 30000 -j DROP
     "$ipt" -A $CHAIN -p udp -m conntrack --ctstate NEW -m hashlimit --hashlimit-name ag_udp \
-        --hashlimit-mode dstip --hashlimit-above 200/sec --hashlimit-burst 400 \
+        --hashlimit-mode dstip --hashlimit-above 500/sec --hashlimit-burst 1000 \
         --hashlimit-htable-expire 30000 -j DROP
     "$ipt" -A $CHAIN -j RETURN
     "$ipt" -C OUTPUT -j $CHAIN 2>/dev/null || "$ipt" -I OUTPUT -j $CHAIN
@@ -698,25 +700,47 @@ remove_fw() { _fw_remove iptables; _fw_remove ip6tables; }
 
 # ---------- brute-force shield (fail2ban) ----------
 setup_f2b() {
-    command -v fail2ban-server >/dev/null 2>&1 || \
+    # Record whether fail2ban pre-existed, so disable can restore its state
+    # instead of clobbering a setup the operator already relied on.
+    if ! command -v fail2ban-server >/dev/null 2>&1; then
+        touch "$ABUSE_DIR/owns_fail2ban"
         DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban >/dev/null 2>&1
-    # Dropbear filter is missing on some distros — provide one.
-    [ -f /etc/fail2ban/filter.d/dropbear.conf ] || cat > /etc/fail2ban/filter.d/dropbear.conf <<'F2BEOF'
+    else
+        systemctl is-enabled --quiet fail2ban 2>/dev/null && echo enabled > "$ABUSE_DIR/f2b_prev" || echo disabled > "$ABUSE_DIR/f2b_prev"
+    fi
+    command -v fail2ban-server >/dev/null 2>&1 || { echo "  brute-force: fail2ban unavailable — skipped"; return 1; }
+    # Dropbear filter is missing on some distros — provide one, and remember we
+    # created it so teardown only removes a guard-owned file.
+    if [ ! -f /etc/fail2ban/filter.d/dropbear.conf ]; then
+        touch "$ABUSE_DIR/owns_dropbear_filter"
+        cat > /etc/fail2ban/filter.d/dropbear.conf <<'F2BEOF'
 [Definition]
 failregex = ^.*[Bb]ad (PAM )?password attempt for .* from <HOST>(:\d+)?$
             ^.*[Ll]ogin attempt for nonexistent user.* from <HOST>(:\d+)?$
             ^.*exit before auth \(user '.*'.*\): Disconnect received.*<HOST>.*$
 ignoreregex =
 F2BEOF
-    cat > /etc/fail2ban/jail.d/abuse-guard.local <<'F2BEOF'
+    fi
+    # Pick a working log source: prefer /var/log/auth.log (rsyslog); fall back
+    # to the systemd journal on log-less minimal images. Without this the jails
+    # can start with no log source and never ban anything.
+    local src
+    if [ -f /var/log/auth.log ]; then
+        src=$'backend  = auto\nlogpath  = /var/log/auth.log'
+    else
+        src='backend  = systemd'
+    fi
+    cat > /etc/fail2ban/jail.d/abuse-guard.local <<F2BEOF
 [sshd]
 enabled  = true
+$src
 maxretry = 5
 findtime = 10m
 bantime  = 1h
 
 [dropbear]
 enabled  = true
+$src
 maxretry = 5
 findtime = 10m
 bantime  = 1h
@@ -726,7 +750,18 @@ F2BEOF
 }
 teardown_f2b() {
     rm -f /etc/fail2ban/jail.d/abuse-guard.local
-    systemctl restart fail2ban >/dev/null 2>&1
+    [ -f "$ABUSE_DIR/owns_dropbear_filter" ] && rm -f /etc/fail2ban/filter.d/dropbear.conf "$ABUSE_DIR/owns_dropbear_filter"
+    if [ -f "$ABUSE_DIR/owns_fail2ban" ]; then
+        # We installed it just for the guard — stop and disable it.
+        systemctl stop fail2ban >/dev/null 2>&1
+        systemctl disable fail2ban >/dev/null 2>&1
+        rm -f "$ABUSE_DIR/owns_fail2ban"
+    else
+        # Pre-existing install — reload without our jail, keep their state.
+        systemctl restart fail2ban >/dev/null 2>&1
+        [ "$(cat "$ABUSE_DIR/f2b_prev" 2>/dev/null)" = disabled ] && systemctl disable fail2ban >/dev/null 2>&1
+        rm -f "$ABUSE_DIR/f2b_prev"
+    fi
 }
 
 # ---------- content filter (dnsmasq, server-side, no client hijack) ----------
@@ -743,27 +778,42 @@ fetch_blocklist() {
     fi
     rm -f "$tmp"
 }
+restore_slowdns() {
+    # Restore the original SlowDNS unit and verify it comes back up. Loud on
+    # failure — SlowDNS must never be left broken by the content filter.
+    [ -f "$SLOWDNS_BAK" ] || return 0
+    cp -f "$SLOWDNS_BAK" "$SLOWDNS_UNIT"; rm -f "$SLOWDNS_BAK"
+    systemctl daemon-reload; systemctl restart slowdns >/dev/null 2>&1; sleep 1
+    systemctl is-active --quiet slowdns 2>/dev/null || echo "  WARNING: SlowDNS did not restart cleanly — check: journalctl -u slowdns"
+}
 free_53_for_dnsmasq() {
     # If SlowDNS (dnstt) holds 0.0.0.0:53 it blocks dnsmasq on 127.0.0.1:53.
     # Rebind dnstt to the public IP so loopback:53 frees. Never leave it broken.
     systemctl is-active --quiet slowdns 2>/dev/null || return 0
     [ -f "$SLOWDNS_UNIT" ] || return 0
     grep -q -- "-udp :53" "$SLOWDNS_UNIT" || return 0
+    # PUBIP must be an address actually configured on this host, or dnstt will
+    # fail to bind it. If it isn't local (NAT / floating IP), leave SlowDNS as
+    # is and skip the content filter rather than risk breaking the tunnel.
     [ -n "$PUBIP" ] || return 1
+    ip -o addr show 2>/dev/null | grep -qw "$PUBIP" || return 1
     cp -f "$SLOWDNS_UNIT" "$SLOWDNS_BAK"
     sed -i "s/-udp :53/-udp ${PUBIP}:53/" "$SLOWDNS_UNIT"
     systemctl daemon-reload
     systemctl restart slowdns; sleep 1
     if ! systemctl is-active --quiet slowdns; then
-        cp -f "$SLOWDNS_BAK" "$SLOWDNS_UNIT"; rm -f "$SLOWDNS_BAK"
-        systemctl daemon-reload; systemctl restart slowdns
+        restore_slowdns
         return 1
     fi
 }
 setup_dns() {
-    command -v dnsmasq >/dev/null 2>&1 || \
+    if ! command -v dnsmasq >/dev/null 2>&1; then
+        touch "$ABUSE_DIR/owns_dnsmasq"
         DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq >/dev/null 2>&1
-    command -v dnsmasq >/dev/null 2>&1 || { echo "  content filter: dnsmasq unavailable — skipped"; return 1; }
+    else
+        systemctl is-enabled --quiet dnsmasq 2>/dev/null && echo enabled > "$ABUSE_DIR/dnsmasq_prev" || echo disabled > "$ABUSE_DIR/dnsmasq_prev"
+    fi
+    command -v dnsmasq >/dev/null 2>&1 || { echo "  content filter: dnsmasq unavailable — skipped"; rm -f "$ABUSE_DIR/owns_dnsmasq"; return 1; }
     fetch_blocklist
     cat > /etc/dnsmasq.d/abuse-guard.conf <<DNSEOF
 listen-address=127.0.0.1
@@ -792,13 +842,20 @@ DNSEOF
 }
 teardown_dns() {
     rm -f /etc/dnsmasq.d/abuse-guard.conf
-    systemctl stop dnsmasq >/dev/null 2>&1
-    systemctl disable dnsmasq >/dev/null 2>&1
+    # Restore resolv.conf FIRST so name resolution never depends on our resolver.
     [ -f "$RESOLV_BAK" ] && { cp -f "$RESOLV_BAK" /etc/resolv.conf; rm -f "$RESOLV_BAK"; }
-    if [ -f "$SLOWDNS_BAK" ]; then
-        cp -f "$SLOWDNS_BAK" "$SLOWDNS_UNIT"; rm -f "$SLOWDNS_BAK"
-        systemctl daemon-reload; systemctl restart slowdns >/dev/null 2>&1
+    if [ -f "$ABUSE_DIR/owns_dnsmasq" ]; then
+        # We installed dnsmasq only for the guard — stop and disable it.
+        systemctl stop dnsmasq >/dev/null 2>&1
+        systemctl disable dnsmasq >/dev/null 2>&1
+        rm -f "$ABUSE_DIR/owns_dnsmasq"
+    else
+        # Pre-existing dnsmasq — reload without our conf, keep their state.
+        systemctl restart dnsmasq >/dev/null 2>&1
+        [ "$(cat "$ABUSE_DIR/dnsmasq_prev" 2>/dev/null)" = disabled ] && systemctl disable dnsmasq >/dev/null 2>&1
+        rm -f "$ABUSE_DIR/dnsmasq_prev"
     fi
+    restore_slowdns
 }
 
 status() {
