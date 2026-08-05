@@ -766,16 +766,50 @@ teardown_f2b() {
 
 # ---------- content filter (dnsmasq, server-side, no client hijack) ----------
 fetch_blocklist() {
-    local url="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-gambling/hosts"
-    local alt="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts"
-    local tmp; tmp=$(mktemp)
-    if curl -fsSL "$url" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-        grep -E '^0\.0\.0\.0 ' "$tmp" > "$BLOCK_HOSTS"
-    elif curl -fsSL "$alt" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-        grep -E '^0\.0\.0\.0 ' "$tmp" > "$BLOCK_HOSTS"
-    elif [ ! -s "$BLOCK_HOSTS" ]; then
-        : > "$BLOCK_HOSTS"
+    # Aggregate the big maintained world databases per category:
+    #   porn      — StevenBlack, Blocklist Project, Sinfonietta
+    #   betting   — StevenBlack, Blocklist Project, Sinfonietta
+    #   torrents  — Blocklist Project (tracker/index sites; complements port block)
+    #   carding   — Blocklist Project fraud + scam feeds
+    # All hosts-format feeds; merged, normalized and deduplicated. If every
+    # fetch fails, the previous blocklist is kept untouched.
+    local urls="
+https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-gambling/hosts
+https://raw.githubusercontent.com/blocklistproject/Lists/master/porn.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/gambling.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/torrent.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/fraud.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
+https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/pornography-hosts
+https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/gambling-hosts
+"
+    local tmp raw u ok=0
+    tmp=$(mktemp); raw=$(mktemp)
+    for u in $urls; do
+        if curl -fsSL --max-time 180 "$u" -o "$raw" 2>/dev/null && [ -s "$raw" ]; then
+            cat "$raw" >> "$tmp"; echo >> "$tmp"; ok=1
+        else
+            echo "  blocklist: could not fetch $u (skipped)"
+        fi
+    done
+    rm -f "$raw"
+    if [ "$ok" = 1 ]; then
+        # Accept "0.0.0.0 dom" / "127.0.0.1 dom" / bare-domain lines; drop
+        # comments and junk; lowercase; dedupe; emit dnsmasq hosts format.
+        awk '{ sub(/\r$/,"") }
+             /^[[:space:]]*(#|$)/ { next }
+             { d=$1
+               if (d=="0.0.0.0" || d=="127.0.0.1") d=$2
+               d=tolower(d)
+               if (d ~ /^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$/ && d != "localhost")
+                   print d }' "$tmp" | sort -u | sed 's/^/0.0.0.0 /' > "${BLOCK_HOSTS}.new"
+        if [ -s "${BLOCK_HOSTS}.new" ]; then
+            mv -f "${BLOCK_HOSTS}.new" "$BLOCK_HOSTS"
+        else
+            rm -f "${BLOCK_HOSTS}.new"
+        fi
     fi
+    [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
     rm -f "$tmp"
 }
 restore_slowdns() {
