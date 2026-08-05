@@ -23,11 +23,20 @@ otherwise just reload without the guard's config and restore prior state.
 setup the operator already relied on.
 
 **DNS filter now ENFORCES client DNS too** (user reversed the earlier
-server-side-only choice after bypass tests): nat OUTPUT redirects all port-53
-lookups into dnsmasq (owner-exempt the dnsmasq uid or lookups loop), and known
-DoT/DoH resolver endpoints are rejected (ESTABLISHED-return first for zero
-cost). v6 DNS is rejected so clients fall back to v4. Boot unit must order
-After=dnsmasq.service or enforcement is silently skipped on reboot. Fallback `nameserver 1.1.1.1` so DNS
+server-side-only choice after bypass tests): redirect all port-53 lookups into
+dnsmasq via BOTH nat OUTPUT (server-side proxies: sshd/xray/ws-proxy) AND nat
+PREROUTING (forwarded/TUN clients). PREROUTING must RETURN on
+`-m addrtype --dst-type LOCAL` FIRST or it hijacks SlowDNS inbound on PUBIP:53.
+PREROUTING→loopback REDIRECT needs `sysctl net.ipv4.conf.all.route_localnet=1`.
+OUTPUT must owner-exempt the dnsmasq uid (`id -u dnsmasq`) or upstream queries
+loop. Block DoT(853), DoH(443+QUIC to known resolver IPs) on OUTPUT+FORWARD;
+reject v6 DNS so clients fall back to v4. Boot unit orders After=dnsmasq.service.
+**Large blocklists (1.6M) can silently fail to load / OOM** → dnsmasq is up but
+answers real IPs = no filtering. Always verify with a canary dig (@127.0.0.1
+must return 0.0.0.0) after start; `abuse-guard test` exposes the whole path.
+**Client encrypted DNS the tunnel can't see is the irreducible limit** — if a
+site still opens after `test` PASSes, the client isn't routing DNS/web through
+the server. Fallback `nameserver 1.1.1.1` so DNS
 survives if dnsmasq dies; blocked domains answer 0.0.0.0 instantly so no
 fallthrough. Restore resolv.conf FIRST in teardown.
 
