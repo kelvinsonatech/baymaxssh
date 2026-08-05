@@ -706,19 +706,37 @@ remove_fw() { _fw_remove iptables; _fw_remove ip6tables; }
 # "talks to 8.8.8.8" but gets filtered answers — and (b) block the known
 # encrypted-DNS side doors. NAT only sees the first packet of a connection
 # and the filter chain RETURNs on ESTABLISHED first, so speed is untouched.
-DOH_IPS="1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 9.9.9.9 149.112.112.112 94.140.14.14 94.140.15.15 208.67.222.222 208.67.220.220"
+# Well-known DoH/DoT resolver IPs (these addresses serve DNS only, so blocking
+# 443/853 to them breaks nothing legitimate). Covers Cloudflare, Google, Quad9,
+# AdGuard, OpenDNS/Cisco, NextDNS anycast, ControlD, Mullvad, CleanBrowsing.
+DOH_IPS="1.1.1.1 1.0.0.1 1.1.1.2 1.1.1.3 8.8.8.8 8.8.4.4 9.9.9.9 9.9.9.11 149.112.112.112 149.112.112.11 94.140.14.14 94.140.15.15 94.140.14.15 208.67.222.222 208.67.220.220 208.67.222.123 45.90.28.0 45.90.30.0 76.76.2.0 76.76.10.0 194.242.2.2 185.228.168.9 185.228.169.9 76.76.19.19 76.223.122.150 130.59.31.248 216.239.32.10 216.239.34.10"
+DNSMASQ_UID() { id -u dnsmasq 2>/dev/null || id -u dnsmasq-nm 2>/dev/null; }
 apply_dnsforce() {
     systemctl is-active --quiet dnsmasq 2>/dev/null || return 0
-    # v4: redirect all locally-originated DNS into dnsmasq (127.0.0.1:53).
+    # REDIRECT to loopback from the forwarded/PREROUTING path needs this.
+    sysctl -qw net.ipv4.conf.all.route_localnet=1 2>/dev/null
+    local uid; uid=$(DNSMASQ_UID)
+
+    # --- Transparent DNS capture: force every port-53 lookup into dnsmasq ---
+    # (a) OUTPUT: catches DNS from server-side proxies (sshd SOCKS, xray/V2Ray,
+    #     ws-proxy) that resolve on behalf of tunnel users.
     iptables -t nat -N ABUSE_DNS 2>/dev/null; iptables -t nat -F ABUSE_DNS
-    # dnsmasq's own upstream queries must pass, or lookups would loop.
-    iptables -t nat -A ABUSE_DNS -m owner --uid-owner dnsmasq -j RETURN 2>/dev/null
+    # dnsmasq's own upstream queries must pass or lookups loop forever.
+    [ -n "$uid" ] && iptables -t nat -A ABUSE_DNS -m owner --uid-owner "$uid" -j RETURN
     iptables -t nat -A ABUSE_DNS -d 127.0.0.0/8 -j RETURN
     iptables -t nat -A ABUSE_DNS -p udp --dport 53 -j REDIRECT --to-ports 53
     iptables -t nat -A ABUSE_DNS -p tcp --dport 53 -j REDIRECT --to-ports 53
     iptables -t nat -C OUTPUT -j ABUSE_DNS 2>/dev/null || iptables -t nat -A OUTPUT -j ABUSE_DNS
-    # Encrypted-DNS side doors: DoT (853) + HTTPS to well-known DoH resolver
-    # IPs (those addresses serve DNS only, so nothing legitimate breaks).
+    # (b) PREROUTING: catches DNS from TUN/route-based tunnels where client
+    #     packets are forwarded, not locally generated. Skip anything destined
+    #     to the server itself so SlowDNS (dnstt on PUBIP:53) is never hijacked.
+    iptables -t nat -N ABUSE_DNSP 2>/dev/null; iptables -t nat -F ABUSE_DNSP
+    iptables -t nat -A ABUSE_DNSP -m addrtype --dst-type LOCAL -j RETURN
+    iptables -t nat -A ABUSE_DNSP -p udp --dport 53 -j REDIRECT --to-ports 53
+    iptables -t nat -A ABUSE_DNSP -p tcp --dport 53 -j REDIRECT --to-ports 53
+    iptables -t nat -C PREROUTING -j ABUSE_DNSP 2>/dev/null || iptables -t nat -I PREROUTING -j ABUSE_DNSP
+
+    # --- Encrypted-DNS side doors: DoT(853), DoH(443 to resolver IPs), QUIC ---
     iptables -N ABUSE_DOH 2>/dev/null; iptables -F ABUSE_DOH
     iptables -A ABUSE_DOH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
     iptables -A ABUSE_DOH -p tcp --dport 853 -j REJECT --reject-with tcp-reset
@@ -729,8 +747,10 @@ apply_dnsforce() {
         iptables -A ABUSE_DOH -d "$ip" -p udp --dport 443 -j DROP
     done
     iptables -C OUTPUT -j ABUSE_DOH 2>/dev/null || iptables -I OUTPUT -j ABUSE_DOH
-    # v6: dnsmasq listens on v4 loopback only, so v6 DNS can't be redirected —
-    # reject it instead; clients fall back to v4, which lands in the filter.
+    iptables -C FORWARD -j ABUSE_DOH 2>/dev/null || iptables -I FORWARD -j ABUSE_DOH
+
+    # v6: dnsmasq is v4-loopback only, so v6 DNS can't be redirected — reject it
+    # so clients fall back to v4 (which lands in the filter). Also block v6 DoT.
     if command -v ip6tables >/dev/null 2>&1; then
         ip6tables -N ABUSE_DOH 2>/dev/null; ip6tables -F ABUSE_DOH
         ip6tables -A ABUSE_DOH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
@@ -740,19 +760,21 @@ apply_dnsforce() {
         ip6tables -A ABUSE_DOH -p tcp --dport 853 -j REJECT --reject-with tcp-reset
         ip6tables -A ABUSE_DOH -p udp --dport 853 -j DROP
         ip6tables -C OUTPUT -j ABUSE_DOH 2>/dev/null || ip6tables -I OUTPUT -j ABUSE_DOH
+        ip6tables -C FORWARD -j ABUSE_DOH 2>/dev/null || ip6tables -I FORWARD -j ABUSE_DOH
     fi
 }
 remove_dnsforce() {
     iptables -t nat -D OUTPUT -j ABUSE_DNS 2>/dev/null
-    iptables -t nat -F ABUSE_DNS 2>/dev/null
-    iptables -t nat -X ABUSE_DNS 2>/dev/null
+    iptables -t nat -F ABUSE_DNS 2>/dev/null; iptables -t nat -X ABUSE_DNS 2>/dev/null
+    iptables -t nat -D PREROUTING -j ABUSE_DNSP 2>/dev/null
+    iptables -t nat -F ABUSE_DNSP 2>/dev/null; iptables -t nat -X ABUSE_DNSP 2>/dev/null
     iptables -D OUTPUT -j ABUSE_DOH 2>/dev/null
-    iptables -F ABUSE_DOH 2>/dev/null
-    iptables -X ABUSE_DOH 2>/dev/null
+    iptables -D FORWARD -j ABUSE_DOH 2>/dev/null
+    iptables -F ABUSE_DOH 2>/dev/null; iptables -X ABUSE_DOH 2>/dev/null
     if command -v ip6tables >/dev/null 2>&1; then
         ip6tables -D OUTPUT -j ABUSE_DOH 2>/dev/null
-        ip6tables -F ABUSE_DOH 2>/dev/null
-        ip6tables -X ABUSE_DOH 2>/dev/null
+        ip6tables -D FORWARD -j ABUSE_DOH 2>/dev/null
+        ip6tables -F ABUSE_DOH 2>/dev/null; ip6tables -X ABUSE_DOH 2>/dev/null
     fi
 }
 
@@ -921,10 +943,23 @@ DNSEOF
         rm -f /etc/dnsmasq.d/abuse-guard.conf; return 1
     fi
     systemctl enable dnsmasq >/dev/null 2>&1
-    systemctl restart dnsmasq >/dev/null 2>&1; sleep 1
+    systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
     if ! systemctl is-active --quiet dnsmasq; then
-        echo "  content filter: dnsmasq failed to start — reverting"
+        echo "  content filter: dnsmasq failed to load the blocklist — check 'dnsmasq --test'"
+        journalctl -u dnsmasq -n 5 --no-pager 2>/dev/null | sed 's/^/    /'
         teardown_dns; return 1
+    fi
+    # Prove the filter actually answers 0.0.0.0 for a blocked domain before we
+    # trust it — a huge addn-hosts file can load partially or be too big for RAM.
+    local canary ans
+    canary=$(grep -m1 -E '^0\.0\.0\.0 ' "$BLOCK_HOSTS" | awk '{print $2}')
+    if [ -n "$canary" ]; then
+        ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 "$canary" @127.0.0.1; } 2>/dev/null | head -1)
+        [ -z "$ans" ] && command -v nslookup >/dev/null 2>&1 && ans=$(nslookup "$canary" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+        if [ "$ans" != "0.0.0.0" ]; then
+            echo "  content filter: dnsmasq is up but not blocking ($canary -> '${ans:-no answer}')."
+            echo "  Likely the blocklist is too large for this VPS's RAM. Try a smaller set or add more RAM."
+        fi
     fi
     # Point the server's own resolver at the filter (SOCKS remote-DNS and
     # server-side V2Ray lookups get filtered). 1.1.1.1 is a fallback only if
@@ -963,9 +998,47 @@ status() {
         || echo "  brute-force      : off"
     if systemctl is-active --quiet dnsmasq 2>/dev/null && [ -f /etc/dnsmasq.d/abuse-guard.conf ]; then
         echo "  content filter   : active ($(grep -c . "$BLOCK_HOSTS" 2>/dev/null) domains blocked)"
+        iptables -t nat -C OUTPUT -j ABUSE_DNS 2>/dev/null \
+            && echo "  dns enforcement  : active (port-53 redirected, DoH/DoT blocked)" \
+            || echo "  dns enforcement  : off"
     else
         echo "  content filter   : off"
     fi
+}
+
+# Deep diagnostic — proves whether the filter is actually in the traffic path.
+selftest() {
+    local bad="pornhub.com" ans rc=0
+    echo "abuse-guard self-test"
+    echo "---------------------"
+    systemctl is-active --quiet dnsmasq 2>/dev/null \
+        && echo "[ok] dnsmasq running" || { echo "[!!] dnsmasq NOT running"; rc=1; }
+    echo "[..] blocklist size: $(grep -c . "$BLOCK_HOSTS" 2>/dev/null) domains"
+    grep -qw "$bad" "$BLOCK_HOSTS" 2>/dev/null \
+        && echo "[ok] $bad is in the blocklist" || echo "[!!] $bad is NOT in the blocklist"
+    if command -v dig >/dev/null 2>&1; then
+        ans=$(dig +short +time=2 +tries=1 "$bad" @127.0.0.1 2>/dev/null | head -1)
+    else
+        ans=$(nslookup "$bad" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+    fi
+    if [ "$ans" = "0.0.0.0" ]; then
+        echo "[ok] filter answers 0.0.0.0 for $bad (server-side filtering works)"
+    else
+        echo "[!!] filter returned '${ans:-no answer}' for $bad — dnsmasq isn't blocking"
+        echo "     (blocklist likely too big for this VPS's RAM; add RAM or use a smaller set)"
+        rc=1
+    fi
+    iptables -t nat -C OUTPUT -j ABUSE_DNS 2>/dev/null \
+        && echo "[ok] port-53 redirect (OUTPUT) installed" || { echo "[!!] port-53 redirect (OUTPUT) missing"; rc=1; }
+    iptables -t nat -C PREROUTING -j ABUSE_DNSP 2>/dev/null \
+        && echo "[ok] port-53 redirect (forwarded) installed" || echo "[--] forwarded redirect off (fine for proxy-only tunnels)"
+    iptables -C OUTPUT -j ABUSE_DOH 2>/dev/null \
+        && echo "[ok] DoH/DoT side-door blocks installed" || { echo "[!!] DoH/DoT blocks missing"; rc=1; }
+    echo "---------------------"
+    [ "$rc" = 0 ] \
+        && echo "PASS — server-side filtering is active. If a site still opens for a user, their app is using its own encrypted DNS the tunnel can't see, or they aren't routing web traffic through this server." \
+        || echo "FAIL — see [!!] lines above."
+    return $rc
 }
 
 case "$1" in
@@ -985,8 +1058,9 @@ case "$1" in
             apply_fw
             [ -f /etc/dnsmasq.d/abuse-guard.conf ] && apply_dnsforce
         fi ;;
+    test|selftest|check) selftest ;;
     status|"")  status ;;
-    *) echo "usage: abuse-guard {enable|disable|refresh|status}";;
+    *) echo "usage: abuse-guard {enable|disable|refresh|status|test}";;
 esac
 AGEOF
 chmod +x /usr/local/bin/abuse-guard
@@ -2160,6 +2234,7 @@ abuse_menu() {
         menu_item "1" "🛡 " "Enable protection"   "$G"
         menu_item "2" "🧹" "Disable protection"   "$R"
         menu_item "3" "🔄" "Refresh blocklist"    "$SKY"
+        menu_item "4" "🩺" "Test / diagnose"      "$ORANGE"
         menu_item "0" "↩ " "Back to main menu"    "$GR"
         echo ""
         read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" AO
@@ -2169,6 +2244,7 @@ abuse_menu() {
             2) /usr/local/bin/abuse-guard disable; pause ;;
             3) note "Downloading the latest blocklist..."
                /usr/local/bin/abuse-guard refresh; pause ;;
+            4) /usr/local/bin/abuse-guard test; pause ;;
             0) return ;;
             *) err "Invalid option."; sleep 1 ;;
         esac
