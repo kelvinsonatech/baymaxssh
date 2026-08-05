@@ -628,6 +628,232 @@ else
 fi
 
 # ═══════════════════════════════════════════
+# SECTION 6a — ABUSE PROTECTION TOOLING (installed, enabled from the menu)
+# ═══════════════════════════════════════════
+# Drops the `abuse-guard` controller + a boot service. Nothing is enforced until
+# the operator turns it on via the menu, so a fresh install never changes
+# behaviour, speed, or breaks any protocol.
+phase "Abuse protection"
+cat > /usr/local/bin/abuse-guard <<'AGEOF'
+#!/bin/bash
+# abuse-guard — lightweight anti-abuse for the tunnel server.
+#   Modules: brute-force (fail2ban) · egress firewall · torrent block · DNS filter
+# Design: the egress chain RETURNs on ESTABLISHED/RELATED before any rate/port
+# rule, so bulk data is never inspected (zero throughput cost). Everything is
+# reversible and must never leave SlowDNS or any protocol broken.
+set +e
+ABUSE_DIR=/etc/abuse
+FLAG="$ABUSE_DIR/enabled"
+CHAIN=ABUSE_OUT
+CONF_DIR=/etc/ssh-panel
+PUBIP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
+RESOLV_BAK="$ABUSE_DIR/resolv.conf.orig"
+SLOWDNS_UNIT=/etc/systemd/system/slowdns.service
+SLOWDNS_BAK="$ABUSE_DIR/slowdns.service.orig"
+BLOCK_HOSTS="$ABUSE_DIR/blocklist.hosts"
+# Default P2P/DHT/tracker ports (6969 falls inside 6881:6999).
+TORRENT_PORTS="2710,6881:6999,51413"
+mkdir -p "$ABUSE_DIR"
+
+# ---------- egress firewall (v4 + v6) ----------
+_fw_build() {   # $1 = iptables | ip6tables
+    local ipt="$1"
+    command -v "$ipt" >/dev/null 2>&1 || return 0
+    "$ipt" -D OUTPUT -j $CHAIN 2>/dev/null
+    "$ipt" -F $CHAIN 2>/dev/null
+    "$ipt" -X $CHAIN 2>/dev/null
+    "$ipt" -N $CHAIN 2>/dev/null || return 0
+    # Never touch loopback or already-established flows -> no bandwidth cost.
+    "$ipt" -A $CHAIN -o lo -j RETURN
+    "$ipt" -A $CHAIN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    "$ipt" -A $CHAIN -m conntrack --ctstate INVALID -j DROP
+    # Anti-spam: block outbound SMTP (25) — the #1 reputation killer.
+    "$ipt" -A $CHAIN -p tcp --dport 25 -j DROP
+    # Torrent: block default P2P/DHT ports (best effort; encrypted BT evades).
+    "$ipt" -A $CHAIN -p tcp -m multiport --dports $TORRENT_PORTS -j DROP
+    "$ipt" -A $CHAIN -p udp -m multiport --dports $TORRENT_PORTS -j DROP
+    # Let DNS pass untouched.
+    "$ipt" -A $CHAIN -p udp --dport 53 -j RETURN
+    "$ipt" -A $CHAIN -p tcp --dport 53 -j RETURN
+    # DDoS/scan/brute: cap NEW connections to a SINGLE destination, while the
+    # bandwidth of established flows stays fully intact (balanced limits).
+    "$ipt" -A $CHAIN -p tcp --syn -m hashlimit --hashlimit-name ag_syn \
+        --hashlimit-mode dstip --hashlimit-above 200/sec --hashlimit-burst 400 \
+        --hashlimit-htable-expire 30000 -j DROP
+    "$ipt" -A $CHAIN -p udp -m conntrack --ctstate NEW -m hashlimit --hashlimit-name ag_udp \
+        --hashlimit-mode dstip --hashlimit-above 200/sec --hashlimit-burst 400 \
+        --hashlimit-htable-expire 30000 -j DROP
+    "$ipt" -A $CHAIN -j RETURN
+    "$ipt" -C OUTPUT -j $CHAIN 2>/dev/null || "$ipt" -I OUTPUT -j $CHAIN
+}
+_fw_remove() {   # $1 = iptables | ip6tables
+    local ipt="$1"
+    command -v "$ipt" >/dev/null 2>&1 || return 0
+    "$ipt" -D OUTPUT -j $CHAIN 2>/dev/null
+    "$ipt" -F $CHAIN 2>/dev/null
+    "$ipt" -X $CHAIN 2>/dev/null
+}
+apply_fw()  { _fw_build iptables;  _fw_build ip6tables; }
+remove_fw() { _fw_remove iptables; _fw_remove ip6tables; }
+
+# ---------- brute-force shield (fail2ban) ----------
+setup_f2b() {
+    command -v fail2ban-server >/dev/null 2>&1 || \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban >/dev/null 2>&1
+    # Dropbear filter is missing on some distros — provide one.
+    [ -f /etc/fail2ban/filter.d/dropbear.conf ] || cat > /etc/fail2ban/filter.d/dropbear.conf <<'F2BEOF'
+[Definition]
+failregex = ^.*[Bb]ad (PAM )?password attempt for .* from <HOST>(:\d+)?$
+            ^.*[Ll]ogin attempt for nonexistent user.* from <HOST>(:\d+)?$
+            ^.*exit before auth \(user '.*'.*\): Disconnect received.*<HOST>.*$
+ignoreregex =
+F2BEOF
+    cat > /etc/fail2ban/jail.d/abuse-guard.local <<'F2BEOF'
+[sshd]
+enabled  = true
+maxretry = 5
+findtime = 10m
+bantime  = 1h
+
+[dropbear]
+enabled  = true
+maxretry = 5
+findtime = 10m
+bantime  = 1h
+F2BEOF
+    systemctl enable fail2ban >/dev/null 2>&1
+    systemctl restart fail2ban >/dev/null 2>&1
+}
+teardown_f2b() {
+    rm -f /etc/fail2ban/jail.d/abuse-guard.local
+    systemctl restart fail2ban >/dev/null 2>&1
+}
+
+# ---------- content filter (dnsmasq, server-side, no client hijack) ----------
+fetch_blocklist() {
+    local url="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-gambling/hosts"
+    local alt="https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts"
+    local tmp; tmp=$(mktemp)
+    if curl -fsSL "$url" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        grep -E '^0\.0\.0\.0 ' "$tmp" > "$BLOCK_HOSTS"
+    elif curl -fsSL "$alt" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        grep -E '^0\.0\.0\.0 ' "$tmp" > "$BLOCK_HOSTS"
+    elif [ ! -s "$BLOCK_HOSTS" ]; then
+        : > "$BLOCK_HOSTS"
+    fi
+    rm -f "$tmp"
+}
+free_53_for_dnsmasq() {
+    # If SlowDNS (dnstt) holds 0.0.0.0:53 it blocks dnsmasq on 127.0.0.1:53.
+    # Rebind dnstt to the public IP so loopback:53 frees. Never leave it broken.
+    systemctl is-active --quiet slowdns 2>/dev/null || return 0
+    [ -f "$SLOWDNS_UNIT" ] || return 0
+    grep -q -- "-udp :53" "$SLOWDNS_UNIT" || return 0
+    [ -n "$PUBIP" ] || return 1
+    cp -f "$SLOWDNS_UNIT" "$SLOWDNS_BAK"
+    sed -i "s/-udp :53/-udp ${PUBIP}:53/" "$SLOWDNS_UNIT"
+    systemctl daemon-reload
+    systemctl restart slowdns; sleep 1
+    if ! systemctl is-active --quiet slowdns; then
+        cp -f "$SLOWDNS_BAK" "$SLOWDNS_UNIT"; rm -f "$SLOWDNS_BAK"
+        systemctl daemon-reload; systemctl restart slowdns
+        return 1
+    fi
+}
+setup_dns() {
+    command -v dnsmasq >/dev/null 2>&1 || \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq >/dev/null 2>&1
+    command -v dnsmasq >/dev/null 2>&1 || { echo "  content filter: dnsmasq unavailable — skipped"; return 1; }
+    fetch_blocklist
+    cat > /etc/dnsmasq.d/abuse-guard.conf <<DNSEOF
+listen-address=127.0.0.1
+bind-interfaces
+no-resolv
+server=1.1.1.1
+server=8.8.8.8
+cache-size=2000
+addn-hosts=$BLOCK_HOSTS
+DNSEOF
+    if ! free_53_for_dnsmasq; then
+        echo "  content filter: could not coexist with SlowDNS on :53 — skipped"
+        rm -f /etc/dnsmasq.d/abuse-guard.conf; return 1
+    fi
+    systemctl enable dnsmasq >/dev/null 2>&1
+    systemctl restart dnsmasq >/dev/null 2>&1; sleep 1
+    if ! systemctl is-active --quiet dnsmasq; then
+        echo "  content filter: dnsmasq failed to start — reverting"
+        teardown_dns; return 1
+    fi
+    # Point the server's own resolver at the filter (SOCKS remote-DNS and
+    # server-side V2Ray lookups get filtered). 1.1.1.1 is a fallback only if
+    # dnsmasq is down, so blocking still holds while it runs.
+    [ -f "$RESOLV_BAK" ] || cp -f /etc/resolv.conf "$RESOLV_BAK" 2>/dev/null
+    printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\noptions timeout:2 attempts:1\n' > /etc/resolv.conf
+}
+teardown_dns() {
+    rm -f /etc/dnsmasq.d/abuse-guard.conf
+    systemctl stop dnsmasq >/dev/null 2>&1
+    systemctl disable dnsmasq >/dev/null 2>&1
+    [ -f "$RESOLV_BAK" ] && { cp -f "$RESOLV_BAK" /etc/resolv.conf; rm -f "$RESOLV_BAK"; }
+    if [ -f "$SLOWDNS_BAK" ]; then
+        cp -f "$SLOWDNS_BAK" "$SLOWDNS_UNIT"; rm -f "$SLOWDNS_BAK"
+        systemctl daemon-reload; systemctl restart slowdns >/dev/null 2>&1
+    fi
+}
+
+status() {
+    echo "Abuse protection: $([ -f "$FLAG" ] && echo ENABLED || echo disabled)"
+    iptables -C OUTPUT -j $CHAIN 2>/dev/null \
+        && echo "  egress firewall  : active (SMTP + torrent ports blocked, flood-capped)" \
+        || echo "  egress firewall  : off"
+    systemctl is-active --quiet fail2ban 2>/dev/null \
+        && echo "  brute-force      : active (fail2ban: sshd + dropbear)" \
+        || echo "  brute-force      : off"
+    if systemctl is-active --quiet dnsmasq 2>/dev/null && [ -f /etc/dnsmasq.d/abuse-guard.conf ]; then
+        echo "  content filter   : active ($(grep -c . "$BLOCK_HOSTS" 2>/dev/null) domains blocked)"
+    else
+        echo "  content filter   : off"
+    fi
+}
+
+case "$1" in
+    enable)
+        apply_fw; setup_f2b; setup_dns
+        touch "$FLAG"; systemctl enable abuse-guard.service >/dev/null 2>&1
+        echo ""; status ;;
+    disable)
+        remove_fw; teardown_f2b; teardown_dns
+        rm -f "$FLAG"; systemctl disable abuse-guard.service >/dev/null 2>&1
+        echo "Abuse protection disabled — all rules removed, services restored." ;;
+    refresh)
+        fetch_blocklist; systemctl restart dnsmasq >/dev/null 2>&1
+        echo "Blocklist refreshed ($(grep -c . "$BLOCK_HOSTS" 2>/dev/null) domains)." ;;
+    apply-fw)   # boot-time re-apply (firewall only; other modules self-persist)
+        [ -f "$FLAG" ] && apply_fw ;;
+    status|"")  status ;;
+    *) echo "usage: abuse-guard {enable|disable|refresh|status}";;
+esac
+AGEOF
+chmod +x /usr/local/bin/abuse-guard
+
+cat > /etc/systemd/system/abuse-guard.service <<'EOF'
+[Unit]
+Description=Re-apply abuse-guard egress firewall on boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/abuse-guard apply-fw
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload >/dev/null 2>&1
+success "Abuse protection installed (enable it from the menu)"
+
+# ═══════════════════════════════════════════
 # SECTION 6b — BANDWIDTH MONITOR (vnstat)
 # ═══════════════════════════════════════════
 phase "Bandwidth monitor"
@@ -1768,6 +1994,32 @@ slowdns_info() {
     pause
 }
 
+abuse_menu() {
+    while true; do
+        section "ABUSE PROTECTION" "$LIME"
+        /usr/local/bin/abuse-guard status | sed 's/^/  /'
+        echo ""
+        echo -e "  ${GR}Blocks spam(25) + torrent ports, caps floods/scans, fail2ban,${NC}"
+        echo -e "  ${GR}and betting/porn/malware DNS filtering. Bulk speed is untouched.${NC}"
+        echo ""
+        menu_item "1" "🛡 " "Enable protection"   "$G"
+        menu_item "2" "🧹" "Disable protection"   "$R"
+        menu_item "3" "🔄" "Refresh blocklist"    "$SKY"
+        menu_item "0" "↩ " "Back to main menu"    "$GR"
+        echo ""
+        read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" AO
+        case "$AO" in
+            1) note "Applying (first run installs fail2ban + dnsmasq)..."
+               /usr/local/bin/abuse-guard enable; pause ;;
+            2) /usr/local/bin/abuse-guard disable; pause ;;
+            3) note "Downloading the latest blocklist..."
+               /usr/local/bin/abuse-guard refresh; pause ;;
+            0) return ;;
+            *) err "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
 menu_item() {  # menu_item NUM ICON "Label" color
     echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
 }
@@ -1787,6 +2039,7 @@ while true; do
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
     menu_item "11" "🐌" "SlowDNS info"            "$PINK"
+    menu_item "12" "🛡 " "Abuse protection"        "$LIME"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -1802,6 +2055,7 @@ while true; do
         9) xray_menu ;;
         10) restart_services ;;
         11) slowdns_info ;;
+        12) abuse_menu ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
