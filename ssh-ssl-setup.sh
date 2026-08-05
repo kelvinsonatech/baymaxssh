@@ -642,6 +642,10 @@ cat > /usr/local/bin/abuse-guard <<'AGEOF'
 # rule, so bulk data is never inspected (zero throughput cost). Everything is
 # reversible and must never leave SlowDNS or any protocol broken.
 set +e
+# iptables/ip6tables/sysctl live in sbin, which is missing from PATH in some
+# shells/menus — that makes every firewall rule silently fail with
+# "iptables: command not found". Always fix PATH first.
+export PATH=/usr/sbin:/usr/local/sbin:/sbin:$PATH
 ABUSE_DIR=/etc/abuse
 FLAG="$ABUSE_DIR/enabled"
 CHAIN=ABUSE_OUT
@@ -1043,6 +1047,12 @@ selftest() {
 
 case "$1" in
     enable)
+        # Minimal images may lack iptables entirely — install it first.
+        if ! command -v iptables >/dev/null 2>&1; then
+            echo "  installing iptables..."
+            DEBIAN_FRONTEND=noninteractive apt-get install -y iptables >/dev/null 2>&1
+        fi
+        command -v iptables >/dev/null 2>&1 || echo "  WARNING: iptables unavailable — firewall + DNS enforcement will stay off"
         apply_fw; setup_f2b; setup_dns
         touch "$FLAG"; systemctl enable abuse-guard.service >/dev/null 2>&1
         echo ""; status ;;
