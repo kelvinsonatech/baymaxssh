@@ -72,6 +72,18 @@ malicious feed, never the torrent/carding core); (2) enable/refresh fail-open
 resolver; (3) cron watchdog every minute lifts enforcement if dnsmasq stops
 answering. Any future filter change must preserve fail-open.
 
+**Torrent enforcement = peer-discovery denial, never DPI (Aug 6, 2026).** Block
+public trackers + DHT bootstrap HOSTNAMES via the DNS filter (curated list +
+wildcards) AND drop NEW packets to hard-coded DHT router IPs
+(router.bittorrent.com/utorrent/transmissionbt) in the egress chain AFTER the
+ESTABLISHED,RELATED RETURN (so only the first UDP/TCP packet is checked → zero
+throughput cost). **Why:** a download TOOL (IDM, wget, browser, torrent client)
+cannot be selectively blocked — they all use normal HTTP(S)/UDP, and telling a
+"pirated movie" download from a legit one needs DPI, which the user has
+permanently ruled out (don't-slow-server invariant). Kill the SOURCE
+(trackers/DHT/piracy domains) and torrenting fails regardless of app. Never add
+a BitTorrent-handshake string match on the data path.
+
 **VPN-infra immunity:** never block tcp/443 to well-known resolver IPs —
 HTTP Custom / injector configs use 1.1.1.1 / 8.8.8.8 etc. as bug-host/proxy
 SNI on 443, so those DoH blocks clip the user's own tunnel. Keep DoT(853) blocks ONLY — no 443 blocking in any form (tcp or udp/QUIC); port-53 redirect stays the primary
