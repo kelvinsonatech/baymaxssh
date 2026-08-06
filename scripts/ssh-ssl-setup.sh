@@ -905,11 +905,10 @@ _ensure_doh_block() {
     [ "$added" = 1 ] && echo "  content filter: encrypted-DNS (DoH) bootstrap names pinned to filter"
     return 0
 }
-# Admin-curated well-known torrent sites & proxy mirrors — always blocked,
-# ships inside the script so every install has them even if feeds fail.
-_ensure_custom_block() {
-    local cl; cl=$(mktemp)
-    cat > "$cl" <<'CBEOF'
+# Subdomain-wide blocking: plain hosts entries match EXACT hostnames only,
+# so www.1337x.to or any mirror subdomain slipped straight past the filter.
+# dnsmasq "address=/dom/0.0.0.0" wildcards block the domain AND every
+# subd
 thepiratebay.org
 piratebay-proxy.com
 piratebay.live
