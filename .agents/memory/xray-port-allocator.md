@@ -25,3 +25,10 @@ ports → xray fails to start with two inbounds on one port.
 **How to apply:** when editing port logic, verify no duplicate ports across all
 ACTIVE protocols for these cases: single-protocol, 443-to-protocol-with-account,
 443-to-protocol-without-account (but another protocol active), all-three-active.
+
+**443 takeover also needs readable TLS key:** Xray's stock unit runs as a
+non-root user, so a root-owned 0600 key fails with "failed to parse key:
+permission denied" (exit 23) even with CAP_NET_BIND_SERVICE granted. xray-gen
+now chowns the cert/key to the unit's `User=` (and copies letsencrypt certs
+into /etc/xray, since LE paths are root-only symlinks). Both perms AND the
+capability drop-in are required for the handover.
