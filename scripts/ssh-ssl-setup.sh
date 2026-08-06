@@ -740,14 +740,20 @@ apply_dnsforce() {
     iptables -t nat -A ABUSE_DNSP -p tcp --dport 53 -j REDIRECT --to-ports 53
     iptables -t nat -C PREROUTING -j ABUSE_DNSP 2>/dev/null || iptables -t nat -I PREROUTING -j ABUSE_DNSP
 
-    # --- Encrypted-DNS side doors: DoT(853), DoH(443 to resolver IPs), QUIC ---
+    # --- Encrypted-DNS side doors: DoT(853) + DoH over QUIC(udp/443) ---
+    # NOTE: we deliberately do NOT block tcp/443 to well-known resolver IPs.
+    # HTTP Custom / injector VPN configs very often use 1.1.1.1, 8.8.8.8 etc.
+    # as the bug-host/proxy SNI on port 443 — blocking those IPs "caps" the
+    # user's own tunnel. The primary enforcement is the port-53 redirect;
+    # tcp/443 DoH is a small residual bypass we accept to never break the VPN.
     iptables -N ABUSE_DOH 2>/dev/null; iptables -F ABUSE_DOH
     iptables -A ABUSE_DOH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
     iptables -A ABUSE_DOH -p tcp --dport 853 -j REJECT --reject-with tcp-reset
     iptables -A ABUSE_DOH -p udp --dport 853 -j DROP
+    # DoH-over-QUIC to resolver IPs only (udp/443 is never used by the VPN's
+    # own TCP/WS/TLS proxy flows, so this cannot clip a bug host).
     local ip
     for ip in $DOH_IPS; do
-        iptables -A ABUSE_DOH -d "$ip" -p tcp --dport 443 -j REJECT --reject-with tcp-reset
         iptables -A ABUSE_DOH -d "$ip" -p udp --dport 443 -j DROP
     done
     iptables -C OUTPUT -j ABUSE_DOH 2>/dev/null || iptables -I OUTPUT -j ABUSE_DOH
@@ -880,20 +886,51 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
     rm -f "$raw"
     if [ "$ok" = 1 ]; then
         # Accept "0.0.0.0 dom" / "127.0.0.1 dom" / bare-domain lines; drop
-        # comments and junk; lowercase; dedupe; emit dnsmasq hosts format.
-        awk '{ sub(/\r$/,"") }
+        # comments and junk; lowercase; dedupe IN FEED ORDER (feeds above are
+        # listed most-important first, so a RAM cap trims the tail feeds, not
+        # the torrent/carding core); emit dnsmasq hosts format.
+        #
+        # RAM cap: dnsmasq keeps addn-hosts in memory (measured ~300+ bytes per
+        # entry with hash/cache overhead). Loading more than the VPS can hold
+        # gets dnsmasq OOM-killed or mute — and with port-53 enforcement active
+        # that would take DNS down for every tunnel user. Cap the list so
+        # dnsmasq never eats more than a quarter of MemAvailable.
+        local mem_kb cap
+        mem_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+        [ -n "$mem_kb" ] || mem_kb=1048576
+        cap=$(( mem_kb * 1024 / 4 / 300 ))
+        [ "$cap" -lt 100000 ] && cap=100000
+        echo "  blocklist: RAM-aware cap for this VPS: $cap domains"
+        awk -v cap="$cap" '{ sub(/\r$/,"") }
              /^[[:space:]]*(#|$)/ { next }
              { d=$1
                if (d=="0.0.0.0" || d=="127.0.0.1") d=$2
                d=tolower(d)
-               if (d ~ /^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$/ && d != "localhost")
-                   print d }' "$tmp" | sort -u | sed 's/^/0.0.0.0 /' > "${BLOCK_HOSTS}.new"
+               if (d ~ /^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$/ && d != "localhost" && !(d in seen)) {
+                   seen[d]=1
+                   print "0.0.0.0 " d
+                   if (++n >= cap) exit
+               } }' "$tmp" > "${BLOCK_HOSTS}.new"
         if [ -s "${BLOCK_HOSTS}.new" ]; then
             mv -f "${BLOCK_HOSTS}.new" "$BLOCK_HOSTS"
         else
             rm -f "${BLOCK_HOSTS}.new"
         fi
     fi
+    # Never block the VPN's own infrastructure: the server's configured
+    # domain, the SlowDNS NS domain, and any hosts the admin whitelists in
+    # /etc/ssh-panel/allow.list (one domain per line — bug hosts, CDN/proxy
+    # hosts used by client configs like HTTP Custom). Aggregated feeds
+    # occasionally contain CDN entries; stripping these here guarantees the
+    # filter can never cut the tunnel's own path.
+    local wl; wl=$(mktemp)
+    { cat /etc/ssh-panel/domain.conf /etc/ssh-panel/nsdomain.conf /etc/ssh-panel/allow.list 2>/dev/null; } \
+        | tr 'A-Z' 'a-z' | grep -E '^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$' | sort -u > "$wl"
+    if [ -s "$wl" ] && [ -s "$BLOCK_HOSTS" ]; then
+        awk 'NR==FNR { wl[$1]=1; next } !($2 in wl)' "$wl" "$BLOCK_HOSTS" > "${BLOCK_HOSTS}.wl" \
+            && mv -f "${BLOCK_HOSTS}.wl" "$BLOCK_HOSTS"
+    fi
+    rm -f "$wl"
     [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
     rm -f "$tmp"
 }
@@ -956,14 +993,23 @@ DNSEOF
     fi
     # Prove the filter actually answers 0.0.0.0 for a blocked domain before we
     # trust it — a huge addn-hosts file can load partially or be too big for RAM.
-    local canary ans
+    local canary ans try
     canary=$(grep -m1 -E '^0\.0\.0\.0 ' "$BLOCK_HOSTS" | awk '{print $2}')
     if [ -n "$canary" ]; then
-        ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 "$canary" @127.0.0.1; } 2>/dev/null | head -1)
-        [ -z "$ans" ] && command -v nslookup >/dev/null 2>&1 && ans=$(nslookup "$canary" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+        # dnsmasq parses the whole addn-hosts file before answering — on a big
+        # list / slow disk that takes a while. Poll up to ~45s before judging.
+        for try in 1 2 3 4 5 6 7 8 9; do
+            ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=3 +tries=1 "$canary" @127.0.0.1; } 2>/dev/null | head -1)
+            [ -z "$ans" ] && command -v nslookup >/dev/null 2>&1 && ans=$(nslookup "$canary" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+            [ "$ans" = "0.0.0.0" ] && break
+            echo "  content filter: waiting for dnsmasq to finish loading the list (${try}/9)..."
+            sleep 5
+        done
         if [ "$ans" != "0.0.0.0" ]; then
             echo "  content filter: dnsmasq is up but not blocking ($canary -> '${ans:-no answer}')."
-            echo "  Likely the blocklist is too large for this VPS's RAM. Try a smaller set or add more RAM."
+            echo "  Refusing to enforce a broken filter — content filter disabled (fail-open)."
+            echo "  Likely the blocklist is too large for this VPS's RAM. Add RAM and re-enable."
+            teardown_dns; return 1
         fi
     fi
     # Point the server's own resolver at the filter (SOCKS remote-DNS and
@@ -973,9 +1019,50 @@ DNSEOF
     printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\noptions timeout:2 attempts:1\n' > /etc/resolv.conf
     # Close the client-side bypasses (hard-coded 8.8.8.8, DoH/DoT).
     apply_dnsforce
+    # Fail-open watchdog: if dnsmasq ever dies or stops answering while the
+    # port-53 redirect is enforcing, DNS would go dark for every tunnel user
+    # and all protocols would look broken. Check every minute; on failure,
+    # lift enforcement (protocols keep working unfiltered) and log loudly.
+    cat > /etc/cron.d/abuse-guard-watchdog <<'WDEOF'
+* * * * * root /usr/local/bin/abuse-guard watchdog >/dev/null 2>&1
+WDEOF
+    chmod 644 /etc/cron.d/abuse-guard-watchdog
+}
+watchdog() {
+    # Runs from cron. Only acts when enforcement is installed.
+    iptables -t nat -C OUTPUT -j ABUSE_DNS 2>/dev/null || exit 0
+    local ans
+    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+        ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 google.com @127.0.0.1; } 2>/dev/null | head -1)
+        [ -z "$ans" ] && ans=$(nslookup google.com 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+        [ -n "$ans" ] && exit 0
+        # One retry before acting — a single timeout under load is not an outage.
+        sleep 3
+        ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 cloudflare.com @127.0.0.1; } 2>/dev/null | head -1)
+        [ -n "$ans" ] && exit 0
+        systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
+        ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 google.com @127.0.0.1; } 2>/dev/null | head -1)
+        [ -n "$ans" ] && exit 0
+    else
+        systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
+        # "active" is not enough — a running-but-mute dnsmasq would still
+        # blackhole redirected DNS. Only trust an actual answer.
+        if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+            ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 google.com @127.0.0.1; } 2>/dev/null | head -1)
+            [ -z "$ans" ] && ans=$(nslookup google.com 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+            [ -n "$ans" ] && exit 0
+        fi
+    fi
+    # dnsmasq is dead or mute and won't come back — FAIL OPEN so user
+    # protocols keep resolving. resolv.conf already lists 1.1.1.1 fallback.
+    remove_dnsforce
+    [ -f "$RESOLV_BAK" ] && cp -f "$RESOLV_BAK" /etc/resolv.conf
+    logger -t abuse-guard "WATCHDOG: dnsmasq unhealthy — DNS enforcement lifted (fail-open). Re-enable from menu 12 after fixing (RAM?)." 2>/dev/null
+    echo "$(date '+%F %T') watchdog: enforcement lifted (dnsmasq unhealthy)" >> "$ABUSE_DIR/watchdog.log"
 }
 teardown_dns() {
     remove_dnsforce
+    rm -f /etc/cron.d/abuse-guard-watchdog
     rm -f /etc/dnsmasq.d/abuse-guard.conf
     # Restore resolv.conf FIRST so name resolution never depends on our resolver.
     [ -f "$RESOLV_BAK" ] && { cp -f "$RESOLV_BAK" /etc/resolv.conf; rm -f "$RESOLV_BAK"; }
@@ -1062,8 +1149,14 @@ case "$1" in
         rm -f "$FLAG"; systemctl disable abuse-guard.service >/dev/null 2>&1
         echo "Abuse protection disabled — all rules removed, services restored." ;;
     refresh)
-        fetch_blocklist; systemctl restart dnsmasq >/dev/null 2>&1
-        echo "Blocklist refreshed ($(grep -c . "$BLOCK_HOSTS" 2>/dev/null) domains)." ;;
+        fetch_blocklist; systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
+        if [ -f /etc/dnsmasq.d/abuse-guard.conf ] && ! systemctl is-active --quiet dnsmasq; then
+            echo "dnsmasq failed to load the new list — filter disabled (fail-open)."
+            teardown_dns
+        else
+            echo "Blocklist refreshed ($(grep -c . "$BLOCK_HOSTS" 2>/dev/null) domains)."
+        fi ;;
+    watchdog) watchdog ;;
     apply-fw)   # boot-time re-apply (firewall + DNS enforcement; rest self-persists)
         if [ -f "$FLAG" ]; then
             apply_fw

@@ -62,3 +62,19 @@ server). Feeds: blocklistproject torrent.txt + hagezi anti-piracy
 (`wildcard/anti.piracy-onlydomains.txt` — the repo has NO `hosts/` dir; use
 wildcard onlydomains or dnsmasq formats). ~41k domains merged. Self-test canary
 is thepiratebay.org.
+
+**Never-break-protocols invariant (Aug 6, 2026):** port-53 enforcement makes
+dnsmasq a single point of failure — if it OOMs under a huge blocklist, ALL
+protocols lose DNS and look broken. Guards now in place: (1) RAM-aware cap on
+blocklist size (dedupe in feed-priority order so the cap trims the bulk
+malicious feed, never the torrent/carding core); (2) enable/refresh fail-open
+— canary or dnsmasq failure tears the filter down instead of enforcing a dead
+resolver; (3) cron watchdog every minute lifts enforcement if dnsmasq stops
+answering. Any future filter change must preserve fail-open.
+
+**VPN-infra immunity:** never block tcp/443 to well-known resolver IPs —
+HTTP Custom / injector configs use 1.1.1.1 / 8.8.8.8 etc. as bug-host/proxy
+SNI on 443, so those DoH blocks clip the user's own tunnel. Keep DoT(853) +
+DoH-over-QUIC(udp/443) blocks only; port-53 redirect stays the primary
+enforcement. Blocklist build strips the server's own domain, NS domain, and
+admin allowlist so feeds can never blackhole the tunnel's own hosts.
