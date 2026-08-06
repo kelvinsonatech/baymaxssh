@@ -252,13 +252,6 @@ phase "WebSocket proxy"
 # Remove any leftover Python proxy from a previous install.
 rm -f /usr/local/bin/ws-proxy.py 2>/dev/null || true
 
-# --- Ensure a Go compiler is available -----------------------------------
-if ! command -v go >/dev/null 2>&1; then
-    info "Installing Go toolchain..."
-    eval "$APT golang-go" </dev/null >/dev/null 2>&1 || true
-fi
-GO_BIN="$(command -v go || true)"
-
 BUILD_DIR=/tmp/ws-proxy-build
 rm -rf "$BUILD_DIR"; mkdir -p "$BUILD_DIR"
 
@@ -407,6 +400,26 @@ func main() {
 }
 GOEOF
 
+# --- Skip the whole toolchain + rebuild when nothing changed --------------
+# Installing golang-go (~hundreds of MB) and recompiling on every run made
+# this phase by far the slowest part of the installer. The proxy source is
+# embedded above, so if the installed binary was built from the exact same
+# source (hash stamp), reuse it instantly.
+WS_STAMP=/usr/local/bin/.ws-proxy.src.md5
+SRC_MD5=$(md5sum "$BUILD_DIR/main.go" 2>/dev/null | awk '{print $1}')
+if [ -x /usr/local/bin/ws-proxy ] && [ -n "$SRC_MD5" ] \
+   && [ "$(cat "$WS_STAMP" 2>/dev/null)" = "$SRC_MD5" ]; then
+    PROXY_EXEC=/usr/local/bin/ws-proxy
+    success "Go proxy already up to date (port 80) — build skipped"
+else
+
+# --- Ensure a Go compiler is available -----------------------------------
+if ! command -v go >/dev/null 2>&1; then
+    info "Installing Go toolchain..."
+    eval "$APT golang-go" </dev/null >/dev/null 2>&1 || true
+fi
+GO_BIN="$(command -v go || true)"
+
 BUILT=0
 if [ -n "$GO_BIN" ]; then
     ( cd "$BUILD_DIR" && \
@@ -417,6 +430,7 @@ fi
 
 if [ "$BUILT" -eq 1 ]; then
     PROXY_EXEC=/usr/local/bin/ws-proxy
+    echo "$SRC_MD5" > "$WS_STAMP"
     success "Compiled Go proxy installed (port 80)"
 else
     # ---- Fallback: Python proxy (if Go could not be installed/built) ----
@@ -514,6 +528,8 @@ PYEOF
     chmod +x /usr/local/bin/ws-proxy.py
     PROXY_EXEC="/usr/bin/python3 /usr/local/bin/ws-proxy.py"
 fi
+
+fi  # end skip-rebuild (stamp matched)
 
 cat > /etc/systemd/system/ws-proxy.service <<EOF
 [Unit]
