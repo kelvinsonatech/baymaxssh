@@ -74,7 +74,6 @@ answering. Any future filter change must preserve fail-open.
 
 **VPN-infra immunity:** never block tcp/443 to well-known resolver IPs —
 HTTP Custom / injector configs use 1.1.1.1 / 8.8.8.8 etc. as bug-host/proxy
-SNI on 443, so those DoH blocks clip the user's own tunnel. Keep DoT(853) +
-DoH-over-QUIC(udp/443) blocks only; port-53 redirect stays the primary
+SNI on 443, so those DoH blocks clip the user's own tunnel. Keep DoT(853) blocks ONLY — no 443 blocking in any form (tcp or udp/QUIC); port-53 redirect stays the primary
 enforcement. Blocklist build strips the server's own domain, NS domain, and
 admin allowlist so feeds can never blackhole the tunnel's own hosts.
