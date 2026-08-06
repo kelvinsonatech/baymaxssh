@@ -850,16 +850,23 @@ teardown_f2b() {
 
 # ---------- content filter (dnsmasq, server-side, no client hijack) ----------
 fetch_blocklist() {
-    # Aggregate the big maintained world torrent/piracy databases:
+    # Aggregate the big maintained world databases per category:
     #   torrents/piracy — Blocklist Project torrent feed (tracker/index sites)
     #                     + hagezi anti-piracy (torrent, DDL, warez, streaming
     #                       piracy — the broad "world" piracy database)
+    #   carding         — Blocklist Project fraud + scam + phishing feeds
+    #   malicious       — hagezi Threat Intelligence Feeds (malware, phishing,
+    #                     scam, botnet/C2 — the aggregated "world" malicious DB)
     # Mixed hosts-format and bare-domain feeds (awk below handles both);
     # merged, normalized and deduplicated. If every
     # fetch fails, the previous blocklist is kept untouched.
     local urls="
 https://raw.githubusercontent.com/blocklistproject/Lists/master/torrent.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/fraud.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
+https://raw.githubusercontent.com/blocklistproject/Lists/master/phishing.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
 "
     local tmp raw u ok=0
     tmp=$(mktemp); raw=$(mktemp)
@@ -2233,7 +2240,7 @@ abuse_menu() {
         /usr/local/bin/abuse-guard status | sed 's/^/  /'
         echo ""
         echo -e "  ${GR}Blocks spam(25) + torrent ports, caps floods/scans, fail2ban,${NC}"
-        echo -e "  ${GR}and torrent/piracy-site DNS filtering. Bulk speed is untouched.${NC}"
+        echo -e "  ${GR}and torrent/piracy + carding/malware DNS filtering. Speed untouched.${NC}"
         echo ""
         menu_item "1" "🛡 " "Enable protection"   "$G"
         menu_item "2" "🧹" "Disable protection"   "$R"
