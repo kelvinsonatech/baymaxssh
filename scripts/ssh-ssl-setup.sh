@@ -740,14 +740,20 @@ apply_dnsforce() {
     iptables -t nat -A ABUSE_DNSP -p tcp --dport 53 -j REDIRECT --to-ports 53
     iptables -t nat -C PREROUTING -j ABUSE_DNSP 2>/dev/null || iptables -t nat -I PREROUTING -j ABUSE_DNSP
 
-    # --- Encrypted-DNS side doors: DoT(853), DoH(443 to resolver IPs), QUIC ---
+    # --- Encrypted-DNS side doors: DoT(853) + DoH over QUIC(udp/443) ---
+    # NOTE: we deliberately do NOT block tcp/443 to well-known resolver IPs.
+    # HTTP Custom / injector VPN configs very often use 1.1.1.1, 8.8.8.8 etc.
+    # as the bug-host/proxy SNI on port 443 — blocking those IPs "caps" the
+    # user's own tunnel. The primary enforcement is the port-53 redirect;
+    # tcp/443 DoH is a small residual bypass we accept to never break the VPN.
     iptables -N ABUSE_DOH 2>/dev/null; iptables -F ABUSE_DOH
     iptables -A ABUSE_DOH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
     iptables -A ABUSE_DOH -p tcp --dport 853 -j REJECT --reject-with tcp-reset
     iptables -A ABUSE_DOH -p udp --dport 853 -j DROP
+    # DoH-over-QUIC to resolver IPs only (udp/443 is never used by the VPN's
+    # own TCP/WS/TLS proxy flows, so this cannot clip a bug host).
     local ip
     for ip in $DOH_IPS; do
-        iptables -A ABUSE_DOH -d "$ip" -p tcp --dport 443 -j REJECT --reject-with tcp-reset
         iptables -A ABUSE_DOH -d "$ip" -p udp --dport 443 -j DROP
     done
     iptables -C OUTPUT -j ABUSE_DOH 2>/dev/null || iptables -I OUTPUT -j ABUSE_DOH
@@ -911,6 +917,20 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
             rm -f "${BLOCK_HOSTS}.new"
         fi
     fi
+    # Never block the VPN's own infrastructure: the server's configured
+    # domain, the SlowDNS NS domain, and any hosts the admin whitelists in
+    # /etc/ssh-panel/allow.list (one domain per line — bug hosts, CDN/proxy
+    # hosts used by client configs like HTTP Custom). Aggregated feeds
+    # occasionally contain CDN entries; stripping these here guarantees the
+    # filter can never cut the tunnel's own path.
+    local wl; wl=$(mktemp)
+    { cat /etc/ssh-panel/domain.conf /etc/ssh-panel/nsdomain.conf /etc/ssh-panel/allow.list 2>/dev/null; } \
+        | tr 'A-Z' 'a-z' | grep -E '^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$' | sort -u > "$wl"
+    if [ -s "$wl" ] && [ -s "$BLOCK_HOSTS" ]; then
+        awk 'NR==FNR { wl[$1]=1; next } !($2 in wl)' "$wl" "$BLOCK_HOSTS" > "${BLOCK_HOSTS}.wl" \
+            && mv -f "${BLOCK_HOSTS}.wl" "$BLOCK_HOSTS"
+    fi
+    rm -f "$wl"
     [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
     rm -f "$tmp"
 }
