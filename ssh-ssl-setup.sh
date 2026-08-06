@@ -673,6 +673,11 @@ SLOWDNS_BAK="$ABUSE_DIR/slowdns.service.orig"
 BLOCK_HOSTS="$ABUSE_DIR/blocklist.hosts"
 # Default P2P/DHT/tracker ports (6969 falls inside 6881:6999).
 TORRENT_PORTS="2710,6881:6999,51413"
+# Stable well-known DHT bootstrap node IPs (router.bittorrent.com,
+# router.utorrent.com, dht.transmissionbt.com). Torrent clients that ignore the
+# DNS filter fall back to these hard-coded addresses to bootstrap DHT — dropping
+# NEW packets to them kills peer discovery. v4 only; harmless if an IP rotates.
+DHT_BOOTSTRAP_IPS="67.215.246.10 82.221.103.244 87.98.162.88 87.98.162.89"
 mkdir -p "$ABUSE_DIR"
 
 # ---------- egress firewall (v4 + v6) ----------
@@ -692,6 +697,16 @@ _fw_build() {   # $1 = iptables | ip6tables
     # Torrent: block default P2P/DHT ports (best effort; encrypted BT evades).
     "$ipt" -A $CHAIN -p tcp -m multiport --dports $TORRENT_PORTS -j DROP
     "$ipt" -A $CHAIN -p udp -m multiport --dports $TORRENT_PORTS -j DROP
+    # DHT bootstrap node IPs (clients that skip DNS fall back to these hard-coded
+    # addresses). Placed AFTER the ESTABLISHED RETURN above, so only the first
+    # UDP/TCP packet of a NEW flow is checked — zero cost to existing throughput.
+    # v4 only; these are the stable well-known DHT routers.
+    if [ "$ipt" = iptables ]; then
+        local dhtip
+        for dhtip in $DHT_BOOTSTRAP_IPS; do
+            "$ipt" -A $CHAIN -d "$dhtip" -j DROP
+        done
+    fi
     # Let DNS pass untouched.
     "$ipt" -A $CHAIN -p udp --dport 53 -j RETURN
     "$ipt" -A $CHAIN -p tcp --dport 53 -j RETURN
@@ -1327,6 +1342,43 @@ x1337x.cc
 1337x.mirrorbay.top
 1337x.privacyfriendly.xyz
 1337x.torlock.icu
+# ---- Public trackers + DHT bootstrap (peer discovery) ----
+# Torrent clients find peers through these even when the index SITE is blocked.
+# Killing tracker + DHT name resolution stops downloads regardless of the app
+# (uTorrent, qBittorrent, IDM's torrent plugin, etc.) with zero speed cost.
+router.bittorrent.com
+router.utorrent.com
+dht.transmissionbt.com
+router.bitcomet.com
+dht.libtorrent.org
+dht.aelitis.com
+bttracker.debian.org
+tracker.opentrackr.org
+tracker.openbittorrent.com
+open.demonii.com
+open.demonii.si
+open.stealth.si
+open.tracker.cl
+tracker.torrent.eu.org
+tracker.dler.org
+tracker.moeking.me
+tracker.tiny-vps.com
+tracker.internetwarriors.net
+tracker.leechers-paradise.org
+tracker.coppersurfer.tk
+tracker.zer0day.to
+tracker.pirateparty.gr
+tracker.cyberia.is
+exodus.desync.com
+explodie.org
+retracker.lanta-net.ru
+9.rarbg.com
+9.rarbg.me
+9.rarbg.to
+tracker.gbitt.info
+opentracker.i2p.rocks
+tracker.tallpenguin.org
+tracker.bt4g.com
 CBEOF
     local added
     added=$(awk 'FNR==NR { if ($1=="0.0.0.0") have[$2]=1; next }
@@ -2911,6 +2963,136 @@ menu_item() {  # menu_item NUM ICON "Label" color
     echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
 }
 
+# ═══════════════════════════════════════════
+# WEB CONTROL PANEL (activate / manage)
+# ═══════════════════════════════════════════
+WEB_CONF="$CONF_DIR/web.conf"
+WEB_UNIT=/etc/systemd/system/ssh-web-panel.service
+web_active() { systemctl is-active --quiet ssh-web-panel 2>/dev/null; }
+web_get() { grep "^$1=" "$WEB_CONF" 2>/dev/null | cut -d= -f2-; }
+port_busy() { ss -ltn 2>/dev/null | grep -q ":$1 " || netstat -ltn 2>/dev/null | grep -q ":$1 "; }
+web_openfw() {
+    iptables -C INPUT -p tcp --dport "$1" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$1" -j ACCEPT 2>/dev/null
+    command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active && ufw allow "$1"/tcp >/dev/null 2>&1
+}
+web_closefw() {
+    iptables -D INPUT -p tcp --dport "$1" -j ACCEPT 2>/dev/null
+    command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active && ufw delete allow "$1"/tcp >/dev/null 2>&1
+}
+web_show_creds() {
+    local col="$G" wp wpath wuser wpass
+    wp=$(web_get PORT); wpath=$(web_get PATH); wuser=$(web_get USER); wpass=$(web_get PASS_PLAIN)
+    banner
+    line_top "$col"; crow "$col" "${W}${BOLD}✔ WEBSITE READY${NC}"; line_mid "$col"
+    row "$col" "${GR}URL${NC}       ${W}https://${HOST_DISPLAY}:${wp}/${wpath}/${NC}"
+    row "$col" "${GR}Username${NC}  ${W}${wuser}${NC}"
+    row "$col" "${GR}Password${NC}  ${W}${wpass}${NC}"
+    line_bot "$col"
+    echo ""
+    echo -e "  ${GR}Open the URL in a browser and log in. The certificate is the${NC}"
+    echo -e "  ${GR}server's own — accept the browser warning if it's self-signed.${NC}"
+}
+web_activate() {
+    section "ACTIVATE WEBSITE" "$G"
+    command -v python3 >/dev/null 2>&1 || { note "Installing python3..."; DEBIAN_FRONTEND=noninteractive apt-get install -y python3 >/dev/null 2>&1; }
+    command -v openssl >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y openssl >/dev/null 2>&1
+    local defport port
+    defport=$(web_get PORT); [ -z "$defport" ] && defport=2053
+    read -rp "$(echo -e "  ${C}Website port${NC} ${GR}(default ${defport})${NC} : ")" port
+    [[ "$port" =~ ^[0-9]+$ ]] || port="$defport"
+    # Never collide with the tunnel's own ports or an in-use port.
+    local reserved=" 22 80 443 447 109 143 53 25 853 2082 2083 2087 2095 2096 8080 "
+    if [[ "$reserved" == *" $port "* ]] || port_busy "$port"; then
+        local cand
+        for cand in 2053 2083 2087 8443 2096 9443 2053; do
+            if [[ "$reserved" != *" $cand "* ]] && ! port_busy "$cand"; then port="$cand"; break; fi
+        done
+        note "Chosen port was busy/reserved — using ${W}$port${NC} instead."
+    fi
+    local wpath wuser wpass salt secret hash
+    wpath=$(openssl rand -hex 8)
+    wuser="admin"
+    wpass=$(openssl rand -base64 9 | tr -d '/+=' | cut -c1-12)
+    salt=$(openssl rand -hex 8)
+    secret=$(openssl rand -hex 16)
+    hash=$(python3 -c "import hashlib,sys;print(hashlib.sha256((sys.argv[1]+sys.argv[2]).encode()).hexdigest())" "$salt" "$wpass")
+    mkdir -p "$CONF_DIR"
+    cat > "$WEB_CONF" <<WC
+PORT=$port
+PATH=$wpath
+USER=$wuser
+SALT=$salt
+PASS_HASH=$hash
+SECRET=$secret
+PASS_PLAIN=$wpass
+WC
+    chmod 600 "$WEB_CONF"
+    cat > "$WEB_UNIT" <<UNIT
+[Unit]
+Description=SSH VPN Web Control Panel
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/ssh-web-panel.py
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    web_openfw "$port"
+    systemctl enable ssh-web-panel >/dev/null 2>&1
+    systemctl restart ssh-web-panel >/dev/null 2>&1
+    sleep 2
+    if web_active; then
+        web_show_creds
+    else
+        err "Website failed to start. Check: journalctl -u ssh-web-panel -n 20"
+    fi
+    pause
+}
+web_deactivate() {
+    section "DEACTIVATE WEBSITE" "$R"
+    local wp; wp=$(web_get PORT)
+    systemctl stop ssh-web-panel >/dev/null 2>&1
+    systemctl disable ssh-web-panel >/dev/null 2>&1
+    [ -n "$wp" ] && web_closefw "$wp"
+    ok "Website deactivated. Your login stays saved for next time."
+    pause
+}
+website_menu() {
+    while true; do
+        section "WEB CONTROL PANEL" "$SKY"
+        local col="$SKY"
+        line_top "$col"
+        if web_active; then
+            row "$col" "${GR}STATUS${NC}  ${G}● active${NC}"
+            row "$col" "${GR}URL${NC}     ${W}https://${HOST_DISPLAY}:$(web_get PORT)/$(web_get PATH)/${NC}"
+            row "$col" "${GR}USER${NC}    ${W}$(web_get USER)${NC}"
+        else
+            row "$col" "${GR}STATUS${NC}  ${R}○ not active${NC}"
+        fi
+        line_bot "$col"
+        echo ""
+        echo -e "  ${GR}A browser dashboard that mirrors this menu — manage users,${NC}"
+        echo -e "  ${GR}services, Xray and abuse protection from any device.${NC}"
+        echo ""
+        menu_item "1" "🌐" "Activate website"      "$G"
+        menu_item "2" "🔑" "Show login details"    "$SKY"
+        menu_item "3" "🧹" "Deactivate website"    "$R"
+        menu_item "0" "↩ " "Back to main menu"     "$GR"
+        echo ""
+        read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" WO
+        case "$WO" in
+            1) web_activate ;;
+            2) if [ -f "$WEB_CONF" ]; then web_show_creds; pause; else err "No website configured yet — activate it first."; sleep 1; fi ;;
+            3) web_deactivate ;;
+            0) return ;;
+            *) err "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
 while true; do
     banner
     status_bar
@@ -2927,6 +3109,7 @@ while true; do
     menu_item "10" "🔄" "Restart all services"    "$Y"
     menu_item "11" "🐌" "SlowDNS info"            "$PINK"
     menu_item "12" "🛡 " "Abuse protection"        "$LIME"
+    menu_item "13" "🌐" "Web control panel"        "$SKY"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -2943,6 +3126,7 @@ while true; do
         10) restart_services ;;
         11) slowdns_info ;;
         12) abuse_menu ;;
+        13) website_menu ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
@@ -2951,6 +3135,575 @@ MENUEOF
 
 chmod +x /usr/local/bin/menu
 success "Management panel installed — type 'menu' to open it"
+
+# ═══════════════════════════════════════════
+# WEB CONTROL PANEL (installed here, activated from the menu)
+# ═══════════════════════════════════════════
+cat > /usr/local/bin/ssh-web-panel.py <<'WEBEOF'
+#!/usr/bin/env python3
+# ============================================================
+# SSH VPN — Web Control Panel
+# A light, single-file HTTPS admin site that mirrors the terminal menu.
+# Activated from the menu ("Activate website"). Runs as root (needs to
+# manage system users). Stdlib only — no frameworks, negligible footprint.
+# ============================================================
+import os, sys, ssl, json, hmac, time, hashlib, subprocess, secrets, re, html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+CONF_DIR = "/etc/ssh-panel"
+WEB_CONF = os.path.join(CONF_DIR, "web.conf")
+STUNNEL_PEM = "/etc/stunnel/stunnel.pem"
+XACC = "/etc/xray/accounts.txt"
+
+def load_conf():
+    c = {}
+    try:
+        with open(WEB_CONF) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                c[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return c
+
+CONF = load_conf()
+PORT = int(CONF.get("PORT", "2053"))
+PREFIX = "/" + CONF.get("PATH", "").strip("/")
+if PREFIX == "/":
+    PREFIX = ""
+ADMIN_USER = CONF.get("USER", "admin")
+PASS_HASH = CONF.get("PASS_HASH", "")
+SALT = CONF.get("SALT", "")
+SECRET = CONF.get("SECRET", secrets.token_hex(16)).encode()
+
+def read_file(p):
+    try:
+        with open(p) as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def cfg(name):
+    return read_file(os.path.join(CONF_DIR, name)).strip()
+
+DOMAIN = cfg("domain.conf")
+SERVER_IP = cfg("ip.conf")
+HOST_DISPLAY = DOMAIN or SERVER_IP or "server"
+IFACE = cfg("iface.conf")
+if not IFACE:
+    try:
+        out = subprocess.run(["ip", "route"], capture_output=True, text=True).stdout
+        for l in out.splitlines():
+            if l.startswith("default"):
+                IFACE = l.split()[4]; break
+    except Exception:
+        IFACE = "eth0"
+
+# ---------- helpers that mirror the terminal menu exactly ----------
+def sh(args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        class R: pass
+        r = R(); r.returncode = 1; r.stdout = ""; r.stderr = str(e); return r
+
+def is_vpn_user(uid, shell):
+    try:
+        return int(uid) >= 1000 and shell in ("/bin/false", "/usr/sbin/nologin")
+    except Exception:
+        return False
+
+def list_users():
+    users = []
+    for line in read_file("/etc/passwd").splitlines():
+        parts = line.split(":")
+        if len(parts) < 7:
+            continue
+        name, _, uid, _, _, _, shell = parts[:7]
+        if not is_vpn_user(uid, shell):
+            continue
+        exp = "-"
+        r = sh(["chage", "-l", name])
+        for l in r.stdout.splitlines():
+            if "Account expires" in l:
+                exp = l.split(":", 1)[1].strip()
+                break
+        online = sh(["pgrep", "-u", name]).returncode == 0
+        sessions = len([x for x in sh(["pgrep", "-u", name]).stdout.split() if x])
+        users.append({"name": name, "exp": exp, "online": online, "sessions": sessions})
+    return users
+
+def count_online():
+    return sum(1 for u in list_users() if u["online"])
+
+def bw_scope(scope):
+    try:
+        r = sh(["vnstat", "-i", IFACE, "--json"])
+        t = json.loads(r.stdout)["interfaces"][0]["traffic"]
+        if scope == "all":
+            e = t.get("total", {})
+        elif scope == "day":
+            e = (t.get("day") or [{}])[-1]
+        else:
+            e = (t.get("month") or [{}])[-1]
+        rx = int(e.get("rx", 0)); tx = int(e.get("tx", 0))
+        return rx, tx, rx + tx
+    except Exception:
+        if scope == "all":
+            try:
+                rx = int(read_file("/sys/class/net/%s/statistics/rx_bytes" % IFACE) or 0)
+                tx = int(read_file("/sys/class/net/%s/statistics/tx_bytes" % IFACE) or 0)
+                return rx, tx, rx + tx
+            except Exception:
+                pass
+        return 0, 0, 0
+
+def hb(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1024 or unit == "PB":
+            return ("%.2f %s" % (n, unit)) if unit != "B" else ("%d B" % n)
+        n /= 1024
+    return "%d B" % n
+
+SERVICES = ["ssh", "dropbear", "ws-proxy", "stunnel4", "xray", "dnsmasq"]
+def svc_active(s):
+    return sh(["systemctl", "is-active", "--quiet", s]).returncode == 0
+
+def valid_name(n):
+    return bool(re.match(r"^[a-z_][a-z0-9_-]{0,31}$", n or ""))
+
+# ---------- session auth ----------
+def make_token():
+    exp = str(int(time.time()) + 8 * 3600)
+    sig = hmac.new(SECRET, exp.encode(), hashlib.sha256).hexdigest()
+    return exp + "." + sig
+
+def check_token(tok):
+    try:
+        exp, sig = tok.split(".", 1)
+        good = hmac.new(SECRET, exp.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, good) and int(exp) > time.time()
+    except Exception:
+        return False
+
+def check_login(user, pw):
+    if user != ADMIN_USER or not PASS_HASH:
+        return False
+    h = hashlib.sha256((SALT + pw).encode()).hexdigest()
+    return hmac.compare_digest(h, PASS_HASH)
+
+# ---------- HTML ----------
+CSS = """
+:root{--bg1:#0b1220;--bg2:#111c33;--card:#0f1b30;--line:#1e2f4d;--tx:#e8eef8;--mut:#8aa0c2;
+--teal:#2dd4bf;--sky:#38bdf8;--indigo:#818cf8;--pink:#f472b6;--grn:#34d399;--red:#f87171;--amber:#fbbf24}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+background:radial-gradient(1200px 600px at 80% -10%,#16305a 0,var(--bg1) 55%) fixed;color:var(--tx);min-height:100vh}
+a{color:var(--sky);text-decoration:none}
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:linear-gradient(180deg,rgba(45,212,191,.06),rgba(129,140,248,.04)),var(--card);
+border:1px solid var(--line);border-radius:22px;box-shadow:0 30px 80px rgba(0,0,0,.45)}
+.login{width:100%;max-width:380px;padding:38px 32px}
+.brand{display:flex;flex-direction:column;align-items:center;gap:6px;margin-bottom:22px}
+.brand .logo{font-weight:800;font-size:26px;letter-spacing:.5px;
+background:linear-gradient(90deg,var(--teal),var(--sky),var(--indigo));-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand .sub{color:var(--mut);font-size:12px;letter-spacing:2px;text-transform:uppercase}
+label{display:block;font-size:12px;color:var(--mut);margin:14px 0 6px}
+input{width:100%;padding:13px 14px;background:#0a1526;border:1px solid var(--line);border-radius:12px;color:var(--tx);font-size:15px;outline:none}
+input:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(45,212,191,.15)}
+.btn{width:100%;margin-top:20px;padding:13px;border:0;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;
+background:linear-gradient(90deg,var(--teal),var(--sky));color:#04121f}
+.btn:hover{filter:brightness(1.07)}
+.btn.sm{width:auto;margin:0;padding:8px 14px;font-size:13px;border-radius:10px}
+.btn.red{background:linear-gradient(90deg,#fb7185,#f43f5e);color:#fff}
+.btn.ghost{background:#12203a;color:var(--tx);border:1px solid var(--line)}
+.err{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.4);color:#fecaca;padding:10px 12px;border-radius:10px;font-size:13px;margin-top:8px}
+.ok{background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.4);color:#bbf7d0;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}
+.shell{display:flex;min-height:100vh}
+.side{width:230px;background:#0a1424;border-right:1px solid var(--line);padding:22px 14px;position:sticky;top:0;height:100vh}
+.side .logo{font-weight:800;font-size:19px;padding:0 10px 18px;
+background:linear-gradient(90deg,var(--teal),var(--indigo));-webkit-background-clip:text;background-clip:text;color:transparent}
+.nav a{display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:11px;color:var(--mut);font-size:14px;margin-bottom:3px}
+.nav a.active,.nav a:hover{background:#12213c;color:var(--tx)}
+.main{flex:1;padding:28px 34px;max-width:1100px}
+.h1{font-size:22px;font-weight:800;margin-bottom:4px}
+.h1 .dim{color:var(--mut);font-weight:500;font-size:14px}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:22px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
+.stat .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:1px}
+.stat .v{font-size:26px;font-weight:800;margin-top:6px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:20px}
+.panel h2{font-size:15px;margin-bottom:14px;color:var(--tx)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+.pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}
+.pill.on{background:rgba(52,211,153,.15);color:#6ee7b7}
+.pill.off{background:rgba(148,163,184,.12);color:#94a3b8}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+.field{flex:1;min-width:140px}
+.field label{margin-top:0}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:7px}
+.dot.on{background:var(--grn);box-shadow:0 0 8px var(--grn)} .dot.off{background:var(--red)}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;word-break:break-all}
+@media(max-width:760px){.side{display:none}.main{padding:18px}}
+"""
+
+def page(body, title="Panel"):
+    return ("<!doctype html><html><head><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<title>%s · SSH VPN</title><style>%s</style></head><body>%s</body></html>"
+            % (html.escape(title), CSS, body))
+
+def login_page(error=""):
+    e = "<div class=err>%s</div>" % html.escape(error) if error else ""
+    body = ("<div class=login-wrap><div class='card login'>"
+            "<div class=brand><div class=logo>SSH VPN</div>"
+            "<div class=sub>Control Panel</div></div>"
+            "<form method=post action='%s/login'>"
+            "<label>Username</label><input name=user autofocus autocomplete=username>"
+            "<label>Password</label><input name=pw type=password autocomplete=current-password>"
+            "%s<button class=btn>Log In</button></form></div></div>" % (PREFIX, e))
+    return page(body, "Login")
+
+NAV = [("", "Dashboard"), ("users", "Users"), ("online", "Online"),
+       ("services", "Services"), ("xray", "Xray / V2Ray"),
+       ("abuse", "Abuse Protection"), ("ports", "Ports")]
+
+def shell(active, inner, title="Dashboard"):
+    nav = ""
+    for slug, label in NAV:
+        cls = "active" if slug == active else ""
+        nav += "<a class='%s' href='%s/%s'>%s</a>" % (cls, PREFIX, slug, label)
+    body = ("<div class=shell><div class=side><div class=logo>SSH VPN</div>"
+            "<div class=nav>%s<a href='%s/logout' style='margin-top:18px;color:var(--red)'>Log out</a></div></div>"
+            "<div class=main>%s</div></div>" % (nav, PREFIX, inner))
+    return page(body, title)
+
+def flash(msg, kind="ok"):
+    if not msg:
+        return ""
+    return "<div class=%s>%s</div>" % (kind, html.escape(msg))
+
+# ---------- views ----------
+def view_dashboard(msg=""):
+    users = list_users()
+    total = len(users)
+    online = sum(1 for u in users if u["online"])
+    _, _, tot = bw_scope("all")
+    svc_html = ""
+    for s in SERVICES:
+        on = svc_active(s)
+        svc_html += "<div style='margin:6px 0'><span class='dot %s'></span>%s</div>" % ("on" if on else "off", s)
+    inner = ("<div class=top><div><div class=h1>Dashboard <span class=dim>· %s</span></div></div></div>"
+             "%s"
+             "<div class=grid>"
+             "<div class=stat><div class=k>Accounts</div><div class=v>%d</div></div>"
+             "<div class=stat><div class=k>Online now</div><div class=v style='color:var(--grn)'>%d</div></div>"
+             "<div class=stat><div class=k>Bandwidth used</div><div class=v>%s</div></div>"
+             "</div>"
+             "<div class=panel><h2>Services</h2>%s</div>"
+             % (html.escape(HOST_DISPLAY), flash(msg), total, online, hb(tot), svc_html))
+    return shell("", inner, "Dashboard")
+
+def view_users(msg="", err=""):
+    users = list_users()
+    rows = ""
+    for u in users:
+        pill = "<span class='pill on'>online</span>" if u["online"] else "<span class='pill off'>offline</span>"
+        rows += ("<tr><td class=mono>%s</td><td>%s</td><td>%s</td>"
+                 "<td class=row style='border:0'>"
+                 "<form method=post action='%s/users/renew' style='display:inline'>"
+                 "<input type=hidden name=user value='%s'>"
+                 "<input name=days placeholder=+days style='width:80px;padding:6px 8px' >"
+                 "<button class='btn sm ghost'>Renew</button></form> "
+                 "<form method=post action='%s/users/passwd' style='display:inline'>"
+                 "<input type=hidden name=user value='%s'>"
+                 "<input name=pw placeholder='new pass' style='width:110px;padding:6px 8px'>"
+                 "<button class='btn sm ghost'>Set</button></form> "
+                 "<form method=post action='%s/users/delete' style='display:inline' onsubmit=\"return confirm('Delete %s?')\">"
+                 "<input type=hidden name=user value='%s'>"
+                 "<button class='btn sm red'>Delete</button></form>"
+                 "</td></tr>"
+                 % (html.escape(u["name"]), html.escape(u["exp"]), pill,
+                    PREFIX, html.escape(u["name"]), PREFIX, html.escape(u["name"]),
+                    PREFIX, html.escape(u["name"]), html.escape(u["name"])))
+    if not rows:
+        rows = "<tr><td colspan=4 style='color:var(--mut)'>No users yet.</td></tr>"
+    inner = ("<div class=top><div class=h1>Users</div></div>"
+             "%s%s"
+             "<div class=panel><h2>Create account</h2>"
+             "<form method=post action='%s/users/create' class=row>"
+             "<div class=field><label>Username</label><input name=user required></div>"
+             "<div class=field><label>Password</label><input name=pw required></div>"
+             "<div class=field><label>Days valid</label><input name=days value=30></div>"
+             "<button class=btn style='max-width:150px'>Create</button></form></div>"
+             "<div class=panel><h2>Accounts</h2><table><tr><th>Username</th><th>Expires</th><th>Status</th><th>Actions</th></tr>%s</table></div>"
+             % (flash(msg), flash(err, "err"), PREFIX, rows))
+    return shell("users", inner, "Users")
+
+def view_online():
+    users = [u for u in list_users() if u["online"]]
+    rows = "".join("<tr><td class=mono>%s</td><td>%d</td></tr>" % (html.escape(u["name"]), u["sessions"]) for u in users)
+    if not rows:
+        rows = "<tr><td colspan=2 style='color:var(--mut)'>Nobody connected right now.</td></tr>"
+    inner = ("<div class=top><div class=h1>Online Users</div></div>"
+             "<div class=panel><table><tr><th>Username</th><th>Sessions</th></tr>%s</table></div>" % rows)
+    return shell("online", inner, "Online")
+
+def view_services(msg=""):
+    rows = ""
+    for s in SERVICES:
+        on = svc_active(s)
+        pill = "<span class='pill on'>running</span>" if on else "<span class='pill off'>stopped</span>"
+        rows += "<tr><td>%s</td><td>%s</td></tr>" % (s, pill)
+    inner = ("<div class=top><div class=h1>Services</div>"
+             "<form method=post action='%s/services/restart'><button class='btn sm'>Restart all</button></form></div>"
+             "%s<div class=panel><table><tr><th>Service</th><th>Status</th></tr>%s</table></div>"
+             % (PREFIX, flash(msg), rows))
+    return shell("services", inner, "Services")
+
+def view_xray():
+    installed = os.path.exists("/usr/local/bin/xray")
+    active = svc_active("xray")
+    accts = 0
+    try:
+        accts = sum(1 for l in read_file(XACC).splitlines() if "|" in l)
+    except Exception:
+        pass
+    st = ("<span class='pill on'>active</span>" if active else
+          ("<span class='pill off'>installed (stopped)</span>" if installed else "<span class='pill off'>not installed</span>"))
+    ctrl = ""
+    if installed:
+        ctrl = ("<form method=post action='%s/xray/start' style='display:inline'><button class='btn sm'>Start</button></form> "
+                "<form method=post action='%s/xray/stop' style='display:inline'><button class='btn sm ghost'>Stop</button></form>"
+                % (PREFIX, PREFIX))
+    inner = ("<div class=top><div class=h1>Xray / V2Ray</div>%s</div>"
+             "<div class=panel><table>"
+             "<tr><th>Status</th><td>%s</td></tr>"
+             "<tr><th>Host</th><td class=mono>%s</td></tr>"
+             "<tr><th>Accounts</th><td>%d</td></tr>"
+             "</table><p style='color:var(--mut);margin-top:12px;font-size:13px'>"
+             "Create/manage individual VMess/VLESS/Trojan accounts from the terminal menu (option 9).</p></div>"
+             % (ctrl, st, html.escape(HOST_DISPLAY), accts))
+    return shell("xray", inner, "Xray")
+
+def view_abuse(msg=""):
+    status = sh(["/usr/local/bin/abuse-guard", "status"]).stdout or "abuse-guard not installed."
+    inner = ("<div class=top><div class=h1>Abuse Protection</div>"
+             "<div class=row>"
+             "<form method=post action='%s/abuse/enable' style='display:inline'><button class='btn sm'>Enable</button></form>"
+             "<form method=post action='%s/abuse/disable' style='display:inline'><button class='btn sm red'>Disable</button></form>"
+             "<form method=post action='%s/abuse/refresh' style='display:inline'><button class='btn sm ghost'>Refresh list</button></form>"
+             "<form method=post action='%s/abuse/test' style='display:inline'><button class='btn sm ghost'>Test</button></form>"
+             "</div></div>%s"
+             "<div class=panel><h2>Status</h2><pre class=mono style='white-space:pre-wrap;color:var(--mut)'>%s</pre></div>"
+             % (PREFIX, PREFIX, PREFIX, PREFIX, flash(msg), html.escape(status)))
+    return shell("abuse", inner, "Abuse Protection")
+
+def view_ports():
+    ports = [("WebSocket (payload)", "80"), ("SSL + payload (TLS)", "443"),
+             ("SSL direct SSH", "447"), ("OpenSSH", "22"), ("Dropbear", "109 / 143")]
+    rows = "".join("<tr><td>%s</td><td class=mono>%s:%s</td></tr>" % (n, html.escape(HOST_DISPLAY), p) for n, p in ports)
+    inner = ("<div class=top><div class=h1>Connection Ports</div></div>"
+             "<div class=panel><table><tr><th>Service</th><th>Address</th></tr>%s</table></div>" % rows)
+    return shell("ports", inner, "Ports")
+
+# ---------- HTTP handler ----------
+class H(BaseHTTPRequestHandler):
+    server_version = "sshvpn"
+    def log_message(self, *a):
+        pass
+
+    def _cookie_token(self):
+        c = self.headers.get("Cookie", "")
+        for part in c.split(";"):
+            part = part.strip()
+            if part.startswith("sess="):
+                return part[5:]
+        return ""
+
+    def authed(self):
+        return check_token(self._cookie_token())
+
+    def _send(self, code, body, ctype="text/html; charset=utf-8", cookie=None, redirect=None):
+        data = body.encode() if isinstance(body, str) else body
+        self.send_response(code)
+        if redirect:
+            self.send_header("Location", redirect)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def _path(self):
+        p = urlparse(self.path).path
+        if PREFIX and p.startswith(PREFIX):
+            p = p[len(PREFIX):]
+        return p or "/"
+
+    def _redirect(self, to):
+        self._send(303, "", redirect=PREFIX + to)
+
+    def do_GET(self):
+        p = self._path()
+        # everything requires the secret prefix
+        if PREFIX and not urlparse(self.path).path.startswith(PREFIX):
+            self._send(404, page("<div class=login-wrap><div class='card login'>Not found</div></div>", "404"))
+            return
+        if p == "/login":
+            self._send(200, login_page())
+            return
+        if p == "/logout":
+            self._send(303, "", cookie="sess=; Path=/; Max-Age=0", redirect=PREFIX + "/login")
+            return
+        if not self.authed():
+            self._redirect("/login")
+            return
+        q = parse_qs(urlparse(self.path).query)
+        m = q.get("m", [""])[0]
+        e = q.get("e", [""])[0]
+        if p == "/" or p == "":
+            self._send(200, view_dashboard(m))
+        elif p == "/users":
+            self._send(200, view_users(m, e))
+        elif p == "/online":
+            self._send(200, view_online())
+        elif p == "/services":
+            self._send(200, view_services(m))
+        elif p == "/xray":
+            self._send(200, view_xray())
+        elif p == "/abuse":
+            self._send(200, view_abuse(m))
+        elif p == "/ports":
+            self._send(200, view_ports())
+        else:
+            self._redirect("/")
+
+    def _form(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        d = parse_qs(raw)
+        return {k: v[0] for k, v in d.items()}
+
+    def do_POST(self):
+        p = self._path()
+        if PREFIX and not urlparse(self.path).path.startswith(PREFIX):
+            self._send(404, "not found", "text/plain")
+            return
+        f = self._form()
+        if p == "/login":
+            if check_login(f.get("user", ""), f.get("pw", "")):
+                self._send(303, "", cookie="sess=%s; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=%d" % (make_token(), 8 * 3600),
+                           redirect=PREFIX + "/")
+            else:
+                self._send(200, login_page("Invalid username or password."))
+            return
+        if not self.authed():
+            self._redirect("/login")
+            return
+        try:
+            self.handle_action(p, f)
+        except Exception as ex:
+            self._redirect("/?m=" + _q("Error: %s" % ex))
+
+    def handle_action(self, p, f):
+        if p == "/users/create":
+            u = f.get("user", "").strip(); pw = f.get("pw", ""); days = f.get("days", "30")
+            if not valid_name(u):
+                return self._redirect("/users?e=" + _q("Invalid username."))
+            if not pw:
+                return self._redirect("/users?e=" + _q("Password required."))
+            if sh(["id", u]).returncode == 0:
+                return self._redirect("/users?e=" + _q("User already exists."))
+            days = days if days.isdigit() else "30"
+            exp = sh(["date", "-d", "+%s days" % days, "+%Y-%m-%d"]).stdout.strip()
+            sh(["useradd", "-e", exp, "-M", "-s", "/bin/false", u])
+            subprocess.run(["passwd", u], input="%s\n%s\n" % (pw, pw), text=True,
+                           capture_output=True)
+            return self._redirect("/users?m=" + _q("Created %s (expires %s)." % (u, exp)))
+        if p == "/users/delete":
+            u = f.get("user", "")
+            if valid_name(u) and sh(["id", u]).returncode == 0:
+                sh(["pkill", "-u", u]); sh(["userdel", "-f", u])
+                return self._redirect("/users?m=" + _q("Deleted %s." % u))
+            return self._redirect("/users?e=" + _q("User not found."))
+        if p == "/users/renew":
+            u = f.get("user", ""); days = f.get("days", "30")
+            days = days if days.isdigit() else "30"
+            if valid_name(u) and sh(["id", u]).returncode == 0:
+                exp = sh(["date", "-d", "+%s days" % days, "+%Y-%m-%d"]).stdout.strip()
+                sh(["chage", "-E", exp, u])
+                return self._redirect("/users?m=" + _q("%s now expires %s." % (u, exp)))
+            return self._redirect("/users?e=" + _q("User not found."))
+        if p == "/users/passwd":
+            u = f.get("user", ""); pw = f.get("pw", "")
+            if valid_name(u) and pw and sh(["id", u]).returncode == 0:
+                subprocess.run(["passwd", u], input="%s\n%s\n" % (pw, pw), text=True, capture_output=True)
+                return self._redirect("/users?m=" + _q("Password updated for %s." % u))
+            return self._redirect("/users?e=" + _q("Could not update password."))
+        if p == "/services/restart":
+            for s in ["ssh", "sshd", "dropbear", "ws-proxy", "stunnel4"]:
+                sh(["systemctl", "restart", s])
+            return self._redirect("/services?m=" + _q("Services restarted."))
+        if p == "/xray/start":
+            sh(["systemctl", "enable", "xray"]); sh(["systemctl", "start", "xray"])
+            return self._redirect("/xray")
+        if p == "/xray/stop":
+            sh(["systemctl", "stop", "xray"])
+            return self._redirect("/xray")
+        if p in ("/abuse/enable", "/abuse/disable", "/abuse/refresh", "/abuse/test"):
+            action = p.split("/")[-1]
+            r = sh(["/usr/local/bin/abuse-guard", action])
+            return self._redirect("/abuse?m=" + _q(("abuse-guard %s done. " % action) + (r.stdout[-300:] if r.stdout else "")))
+        return self._redirect("/")
+
+from urllib.parse import quote as _q
+
+def main():
+    if not PASS_HASH:
+        sys.stderr.write("web panel not configured (no PASS_HASH); run 'Activate website' from the menu.\n")
+        sys.exit(1)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    pem = STUNNEL_PEM if os.path.exists(STUNNEL_PEM) else None
+    if not pem:
+        # self-signed fallback
+        pem = "/etc/ssh-panel/web.pem"
+        if not os.path.exists(pem):
+            sh(["openssl", "req", "-new", "-newkey", "rsa:2048", "-days", "3650", "-nodes",
+                "-x509", "-subj", "/CN=%s" % HOST_DISPLAY, "-out", pem, "-keyout", pem + ".key"])
+            try:
+                with open(pem, "a") as out, open(pem + ".key") as k:
+                    out.write(k.read())
+                os.remove(pem + ".key")
+            except Exception:
+                pass
+    try:
+        ctx.load_cert_chain(certfile=pem)
+    except Exception as e:
+        sys.stderr.write("TLS cert load failed: %s\n" % e)
+        sys.exit(1)
+    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), H)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    sys.stderr.write("SSH VPN web panel on :%d%s\n" % (PORT, PREFIX))
+    httpd.serve_forever()
+
+if __name__ == "__main__":
+    main()
+WEBEOF
+chmod +x /usr/local/bin/ssh-web-panel.py
+success "Web panel installed — activate it from the menu (option 13)"
 
 # ═══════════════════════════════════════════
 # LOGIN WATERMARK (MOTD) — shown on every SSH login / server open
