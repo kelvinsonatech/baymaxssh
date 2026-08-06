@@ -84,6 +84,15 @@ permanently ruled out (don't-slow-server invariant). Kill the SOURCE
 (trackers/DHT/piracy domains) and torrenting fails regardless of app. Never add
 a BitTorrent-handshake string match on the data path.
 
+**Infra allowlist (Aug 6, 2026).** Aggregated feeds once swept in github.com —
+dnsmasq answered 0.0.0.0, curl looped back to the server's own :443 and failed
+with a cert-name mismatch, breaking Xray install. `INFRA_ALLOW` (GitHub hosts,
+debian/ubuntu mirrors, letsencrypt, cloudflare) is stripped from BLOCK_HOSTS by
+`_strip_infra` on EVERY enable/refresh — both the fresh-download and the
+"reuse today's list" fast path. Suffix match covers subdomains but not
+lookalikes (evil-github.com stays blockable). Any new download source the
+script depends on must be added to INFRA_ALLOW.
+
 **VPN-infra immunity:** never block tcp/443 to well-known resolver IPs —
 HTTP Custom / injector configs use 1.1.1.1 / 8.8.8.8 etc. as bug-host/proxy
 SNI on 443, so those DoH blocks clip the user's own tunnel. Keep DoT(853) blocks ONLY — no 443 blocking in any form (tcp or udp/QUIC); port-53 redirect stays the primary
