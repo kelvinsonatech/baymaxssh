@@ -673,17 +673,6 @@ SLOWDNS_BAK="$ABUSE_DIR/slowdns.service.orig"
 BLOCK_HOSTS="$ABUSE_DIR/blocklist.hosts"
 # Default P2P/DHT/tracker ports (6969 falls inside 6881:6999).
 TORRENT_PORTS="2710,6881:6999,51413"
-# Stable well-known DHT bootstrap node IPs (router.bittorrent.com,
-# router.utorrent.com, dht.transmissionbt.com). Torrent clients that ignore the
-# DNS filter fall back to these hard-coded addresses to bootstrap DHT — dropping
-# NEW packets to them kills peer discovery. v4 only; harmless if an IP rotates.
-DHT_BOOTSTRAP_IPS="67.215.246.10 82.221.103.244 87.98.162.88 87.98.162.89"
-# Infrastructure that must NEVER be blocked, no matter what an aggregated feed
-# says: GitHub is where Xray-core and this script's own updates download from.
-# A feed once shipped github.com → dnsmasq answered 0.0.0.0 → curl looped back
-# to our own :443 and failed with a certificate-name mismatch, breaking Xray
-# install. Entries match the domain AND all its subdomains.
-INFRA_ALLOW="github.com githubusercontent.com github.io githubassets.com codeload.github.com api.github.com objects.githubusercontent.com raw.githubusercontent.com release-assets.githubusercontent.com debian.org ubuntu.com launchpad.net letsencrypt.org cloudflare.com"
 mkdir -p "$ABUSE_DIR"
 
 # ---------- egress firewall (v4 + v6) ----------
@@ -703,16 +692,6 @@ _fw_build() {   # $1 = iptables | ip6tables
     # Torrent: block default P2P/DHT ports (best effort; encrypted BT evades).
     "$ipt" -A $CHAIN -p tcp -m multiport --dports $TORRENT_PORTS -j DROP
     "$ipt" -A $CHAIN -p udp -m multiport --dports $TORRENT_PORTS -j DROP
-    # DHT bootstrap node IPs (clients that skip DNS fall back to these hard-coded
-    # addresses). Placed AFTER the ESTABLISHED RETURN above, so only the first
-    # UDP/TCP packet of a NEW flow is checked — zero cost to existing throughput.
-    # v4 only; these are the stable well-known DHT routers.
-    if [ "$ipt" = iptables ]; then
-        local dhtip
-        for dhtip in $DHT_BOOTSTRAP_IPS; do
-            "$ipt" -A $CHAIN -d "$dhtip" -j DROP
-        done
-    fi
     # Let DNS pass untouched.
     "$ipt" -A $CHAIN -p udp --dport 53 -j RETURN
     "$ipt" -A $CHAIN -p tcp --dport 53 -j RETURN
@@ -1348,43 +1327,6 @@ x1337x.cc
 1337x.mirrorbay.top
 1337x.privacyfriendly.xyz
 1337x.torlock.icu
-# ---- Public trackers + DHT bootstrap (peer discovery) ----
-# Torrent clients find peers through these even when the index SITE is blocked.
-# Killing tracker + DHT name resolution stops downloads regardless of the app
-# (uTorrent, qBittorrent, IDM's torrent plugin, etc.) with zero speed cost.
-router.bittorrent.com
-router.utorrent.com
-dht.transmissionbt.com
-router.bitcomet.com
-dht.libtorrent.org
-dht.aelitis.com
-bttracker.debian.org
-tracker.opentrackr.org
-tracker.openbittorrent.com
-open.demonii.com
-open.demonii.si
-open.stealth.si
-open.tracker.cl
-tracker.torrent.eu.org
-tracker.dler.org
-tracker.moeking.me
-tracker.tiny-vps.com
-tracker.internetwarriors.net
-tracker.leechers-paradise.org
-tracker.coppersurfer.tk
-tracker.zer0day.to
-tracker.pirateparty.gr
-tracker.cyberia.is
-exodus.desync.com
-explodie.org
-retracker.lanta-net.ru
-9.rarbg.com
-9.rarbg.me
-9.rarbg.to
-tracker.gbitt.info
-opentracker.i2p.rocks
-tracker.tallpenguin.org
-tracker.bt4g.com
 CBEOF
     local added
     added=$(awk 'FNR==NR { if ($1=="0.0.0.0") have[$2]=1; next }
@@ -1397,18 +1339,6 @@ CBEOF
     # blocked too (picked up on the next dnsmasq restart in setup/refresh).
     _write_wildcards
     return 0
-}
-_strip_infra() {
-    # Remove critical-infrastructure domains (and their subdomains) that an
-    # aggregated feed may have swept in. Runs on every enable/refresh, both
-    # fresh-download and reuse paths, so a bad feed can never break GitHub
-    # downloads (Xray install, script updates) or OS package mirrors.
-    [ -s "$BLOCK_HOSTS" ] || return 0
-    awk -v list="$INFRA_ALLOW" 'BEGIN { n=split(list,a," ") }
-        { keep=1
-          for (i=1;i<=n;i++) if ($2 == a[i] || index($2, "." a[i]) == length($2) - length(a[i])) { keep=0; break }
-          if (keep) print }' "$BLOCK_HOSTS" > "${BLOCK_HOSTS}.infra" \
-        && mv -f "${BLOCK_HOSTS}.infra" "$BLOCK_HOSTS"
 }
 fetch_blocklist() {
     # Aggregate the big maintained world databases per category:
@@ -1435,7 +1365,6 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
        && [ $(( $(date +%s) - $(stat -c %Y "$BLOCK_HOSTS" 2>/dev/null || echo 0) )) -lt 86400 ] \
        && [ "$(grep -c . "$BLOCK_HOSTS")" -ge 10000 ]; then
         echo "  blocklist: reusing today's list ($(grep -c . "$BLOCK_HOSTS") domains) — use 'Refresh blocklist' to force an update"
-        _strip_infra
         _ensure_doh_block
         _ensure_custom_block
         return 0
@@ -1507,7 +1436,6 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
             && mv -f "${BLOCK_HOSTS}.wl" "$BLOCK_HOSTS"
     fi
     rm -f "$wl"
-    _strip_infra
     [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
     # Pin the anti-DoH bootstrap names last so the whitelist strip can't remove
     # them and they survive even if every feed failed.
@@ -2772,17 +2700,6 @@ xray_open_ports() {
 
 xray_install() {
     [ -f "$XBIN" ] && return 0
-    # Self-heal: if the abuse-guard content filter ever swept GitHub into its
-    # blocklist (a bad feed once shipped github.com), DNS answers 0.0.0.0 and
-    # the download below fails with a certificate mismatch. Strip GitHub hosts
-    # from the local blocklist and reload dnsmasq before downloading.
-    local bl=/etc/abuse/blocklist.hosts
-    if [ -s "$bl" ] && grep -qE '^0\.0\.0\.0 ([a-z0-9.-]+\.)?(github\.com|githubusercontent\.com|github\.io)$' "$bl" 2>/dev/null; then
-        note "Content filter was blocking GitHub — unblocking it first..."
-        grep -vE '^0\.0\.0\.0 ([a-z0-9.-]+\.)?(github\.com|githubusercontent\.com|github\.io)$' "$bl" > "${bl}.fix" \
-            && mv -f "${bl}.fix" "$bl"
-        systemctl is-active --quiet dnsmasq 2>/dev/null && systemctl restart dnsmasq >/dev/null 2>&1 && sleep 1
-    fi
     note "Installing Xray-core (needs internet)..."
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
     [ -f "$XBIN" ]
@@ -3034,12 +2951,6 @@ MENUEOF
 
 chmod +x /usr/local/bin/menu
 success "Management panel installed — type 'menu' to open it"
-
-# Web control panel was removed — clean up any leftovers from older installs.
-systemctl stop ssh-web-panel >/dev/null 2>&1 || true
-systemctl disable ssh-web-panel >/dev/null 2>&1 || true
-rm -f /etc/systemd/system/ssh-web-panel.service /usr/local/bin/ssh-web-panel.py /etc/ssh-panel/web.conf
-systemctl daemon-reload >/dev/null 2>&1 || true
 
 # ═══════════════════════════════════════════
 # LOGIN WATERMARK (MOTD) — shown on every SSH login / server open
