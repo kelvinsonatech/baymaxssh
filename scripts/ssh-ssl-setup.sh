@@ -1327,6 +1327,24 @@ else
     CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
 fi
 
+# Xray's stock systemd unit runs as a non-root user (usually 'nobody'), which
+# cannot read root-owned 0600 TLS keys — TLS inbounds then fail with
+# "failed to parse key: permission denied". Make the key readable by the
+# exact user the unit runs as. Letsencrypt keys live behind root-only
+# symlinks, so copy them into /etc/xray first (re-copied on every rebuild,
+# which also picks up renewals).
+XUSER=$(systemctl show -p User xray 2>/dev/null | cut -d= -f2)
+if [ -n "$XUSER" ] && [ "$XUSER" != root ]; then
+    case "$KEY" in
+        /etc/letsencrypt/*)
+            cp -L "$CERT" /etc/xray/xray-le.crt 2>/dev/null
+            cp -L "$KEY"  /etc/xray/xray-le.key 2>/dev/null
+            CERT=/etc/xray/xray-le.crt; KEY=/etc/xray/xray-le.key;;
+    esac
+    chown "$XUSER" "$CERT" "$KEY" 2>/dev/null
+    chmod 644 "$CERT" 2>/dev/null; chmod 600 "$KEY" 2>/dev/null
+fi
+
 # Emit one inbound. args: port proto clients net security path
 ib() {
     local port="$1" proto="$2" cl="$3" net="$4" sec="$5" path="$6"
