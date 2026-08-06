@@ -908,7 +908,21 @@ _ensure_doh_block() {
 # Subdomain-wide blocking: plain hosts entries match EXACT hostnames only,
 # so www.1337x.to or any mirror subdomain slipped straight past the filter.
 # dnsmasq "address=/dom/0.0.0.0" wildcards block the domain AND every
-# subd
+# subdomain under it. Only the curated sites + DoH names go here (~500
+# lines, negligible RAM) — the multi-million-entry feed stays in addn-hosts.
+_write_wildcards() {
+    mkdir -p /etc/dnsmasq.d 2>/dev/null
+    {
+        local d
+        for d in $DOH_BOOTSTRAP; do echo "address=/$d/0.0.0.0"; done
+        [ -s "$ABUSE_DIR/curated.list" ] && awk 'NF{print "address=/" $1 "/0.0.0.0"}' "$ABUSE_DIR/curated.list"
+    } > /etc/dnsmasq.d/abuse-guard-wild.conf 2>/dev/null || true
+}
+# Admin-curated well-known torrent sites & proxy mirrors — always blocked,
+# ships inside the script so every install has them even if feeds fail.
+_ensure_custom_block() {
+    local cl; cl=$(mktemp)
+    cat > "$cl" <<'CBEOF'
 thepiratebay.org
 piratebay-proxy.com
 piratebay.live
@@ -1317,8 +1331,13 @@ CBEOF
     local added
     added=$(awk 'FNR==NR { if ($1=="0.0.0.0") have[$2]=1; next }
          !($1 in have) { print "0.0.0.0 " $1 }' "$BLOCK_HOSTS" "$cl" | tee -a "$BLOCK_HOSTS" | wc -l)
+    mkdir -p "$ABUSE_DIR" 2>/dev/null
+    cp -f "$cl" "$ABUSE_DIR/curated.list" 2>/dev/null
     rm -f "$cl"
     [ "$added" -gt 0 ] && echo "  content filter: $added curated torrent-site domains pinned to filter"
+    # Regenerate the subdomain wildcards so mirrors like www.1337x.to are
+    # blocked too (picked up on the next dnsmasq restart in setup/refresh).
+    _write_wildcards
     return 0
 }
 fetch_blocklist() {
@@ -1476,7 +1495,7 @@ server=/use-application-dns.net/
 DNSEOF
     if ! free_53_for_dnsmasq; then
         echo "  content filter: could not coexist with SlowDNS on :53 — skipped"
-        rm -f /etc/dnsmasq.d/abuse-guard.conf; return 1
+        rm -f /etc/dnsmasq.d/abuse-guard.conf /etc/dnsmasq.d/abuse-guard-wild.conf; return 1
     fi
     systemctl enable dnsmasq >/dev/null 2>&1
     systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
@@ -1557,7 +1576,7 @@ watchdog() {
 teardown_dns() {
     remove_dnsforce
     rm -f /etc/cron.d/abuse-guard-watchdog
-    rm -f /etc/dnsmasq.d/abuse-guard.conf
+    rm -f /etc/dnsmasq.d/abuse-guard.conf /etc/dnsmasq.d/abuse-guard-wild.conf
     # Restore resolv.conf FIRST so name resolution never depends on our resolver.
     [ -f "$RESOLV_BAK" ] && { cp -f "$RESOLV_BAK" /etc/resolv.conf; rm -f "$RESOLV_BAK"; }
     if [ -f "$ABUSE_DIR/owns_dnsmasq" ]; then
@@ -1631,6 +1650,16 @@ selftest() {
     [ "$dohans" = "0.0.0.0" ] \
         && echo "[ok] browser encrypted-DNS (DoH) bootstrap blocked — browsers fall back to the filter" \
         || echo "[!!] DoH bootstrap not blocked (got '${dohans:-no answer}') — browsers may bypass the filter"
+    # Wildcards: any subdomain of a curated site must be blocked too.
+    local subans
+    if command -v dig >/dev/null 2>&1; then
+        subans=$(dig +short +time=2 +tries=1 "www.$bad" @127.0.0.1 2>/dev/null | head -1)
+    else
+        subans=$(nslookup "www.$bad" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+    fi
+    [ "$subans" = "0.0.0.0" ] \
+        && echo "[ok] subdomains blocked too (www.$bad -> 0.0.0.0)" \
+        || { echo "[!!] subdomain NOT blocked (www.$bad -> '${subans:-no answer}')"; rc=1; }
     echo "---------------------"
     [ "$rc" = 0 ] \
         && echo "PASS — server-side filtering is active and browser encrypted-DNS (DoH) is forced back onto the filter. If a site still opens for a user, they aren't routing web traffic through this server, or they've manually hard-set a custom DoH resolver in the app." \
@@ -2922,6 +2951,64 @@ MENUEOF
 
 chmod +x /usr/local/bin/menu
 success "Management panel installed — type 'menu' to open it"
+
+# ═══════════════════════════════════════════
+# LOGIN WATERMARK (MOTD) — shown on every SSH login / server open
+# ═══════════════════════════════════════════
+# Rendered live at login so host + service status are always current. Uses
+# Debian's pam_motd (update-motd.d) so it prints exactly once per login.
+: > /etc/motd 2>/dev/null || true                 # silence the stock Debian MOTD
+[ -f /etc/legal ] && : > /etc/legal 2>/dev/null   # drop the "unauthorized use" notice
+sed -i 's/^#\?PrintLastLog.*/PrintLastLog yes/' /etc/ssh/sshd_config 2>/dev/null || true
+mkdir -p /etc/update-motd.d
+# Remove Debian/Ubuntu default motd fragments so only our watermark shows.
+find /etc/update-motd.d -maxdepth 1 -type f ! -name '00-litronx' -exec chmod -x {} \; 2>/dev/null || true
+cat > /etc/update-motd.d/00-litronx <<'MOTDEOF'
+#!/bin/bash
+# Branded login watermark for the SSH-VPN server.
+NC='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
+TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINK='\033[38;5;213m'
+LIME='\033[38;5;155m'; GRY='\033[38;5;240m'; W='\033[97m'; Y='\033[1;33m'; G='\033[1;32m'; R='\033[1;31m'
+CONF_DIR=/etc/ssh-panel
+DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+SERVER_IP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
+HOST_DISPLAY="${DOMAIN:-${SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}}"
+UP=$(uptime -p 2>/dev/null | sed 's/^up //'); [ -z "$UP" ] && UP="just now"
+NOW=$(date '+%a %d %b %Y · %H:%M')
+users_total=0
+[ -f "$CONF_DIR/users.list" ] && users_total=$(grep -c . "$CONF_DIR/users.list" 2>/dev/null)
+online=$(who 2>/dev/null | wc -l)
+svc=""
+for s in ssh dropbear ws-proxy stunnel4 xray dnsmasq; do
+    if systemctl is-active --quiet "$s" 2>/dev/null; then svc+=" ${G}●${NC}${GRY}${s}${NC}"; else svc+=" ${R}○${NC}${GRY}${s}${NC}"; fi
+done
+echo ""
+echo -e "   ${TEAL} ██████╗ ██████╗ ${SKY}██╗   ██╗${PINK}██████╗ ███╗   ██╗${NC}"
+echo -e "   ${TEAL}██╔════╝██╔════╝ ${SKY}██║   ██║${PINK}██╔══██╗████╗  ██║${NC}"
+echo -e "   ${TEAL}╚█████╗ ╚█████╗  ${SKY}███████║${PINK}██████╔╝██╔██╗ ██║${NC}"
+echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
+echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
+echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
+echo -e "        ${GRY}ws · ssl · openssh · dropbear · v2ray  ${W}${BOLD}VPN SERVER${NC}"
+echo ""
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+printf "  ${TEAL}│${NC}  ${GRY}HOST${NC}    ${W}${BOLD}%-44s${NC}${TEAL}│${NC}\n" "$HOST_DISPLAY"
+printf "  ${TEAL}│${NC}  ${GRY}TIME${NC}    ${W}%-44s${NC}${TEAL}│${NC}\n" "$NOW"
+printf "  ${TEAL}│${NC}  ${GRY}UPTIME${NC}  ${W}%-44s${NC}${TEAL}│${NC}\n" "$UP"
+printf "  ${TEAL}│${NC}  ${GRY}USERS${NC}   ${LIME}%-3s${NC} ${GRY}accounts${NC}   ${Y}%-3s${NC} ${GRY}online%-19s${NC}${TEAL}│${NC}\n" "$users_total" "$online" ""
+echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${TEAL}│${NC} ${GRY}svc${NC}${svc}${TEAL}│${NC}"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo -e "        ${GRY}type${NC} ${W}${BOLD}menu${NC} ${GRY}to open the control panel${NC}"
+echo ""
+MOTDEOF
+chmod +x /etc/update-motd.d/00-litronx
+# OpenSSH on Debian renders update-motd.d through pam_motd; make sure the
+# static-motd printer is also enabled so pam runs the dynamic scripts.
+grep -q 'pam_motd.so motd=/run/motd.dynamic' /etc/pam.d/sshd 2>/dev/null || true
+# Pre-render once so it's visible immediately even before the first pam refresh.
+/etc/update-motd.d/00-litronx > /run/motd.dynamic 2>/dev/null || true
+success "Login watermark installed — shows on every server login"
 
 # ═══════════════════════════════════════════
 # DEFAULT SSH USERS (auto-created)
