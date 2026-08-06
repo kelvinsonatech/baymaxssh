@@ -678,6 +678,12 @@ TORRENT_PORTS="2710,6881:6999,51413"
 # DNS filter fall back to these hard-coded addresses to bootstrap DHT — dropping
 # NEW packets to them kills peer discovery. v4 only; harmless if an IP rotates.
 DHT_BOOTSTRAP_IPS="67.215.246.10 82.221.103.244 87.98.162.88 87.98.162.89"
+# Infrastructure that must NEVER be blocked, no matter what an aggregated feed
+# says: GitHub is where Xray-core and this script's own updates download from.
+# A feed once shipped github.com → dnsmasq answered 0.0.0.0 → curl looped back
+# to our own :443 and failed with a certificate-name mismatch, breaking Xray
+# install. Entries match the domain AND all its subdomains.
+INFRA_ALLOW="github.com githubusercontent.com github.io githubassets.com codeload.github.com api.github.com objects.githubusercontent.com raw.githubusercontent.com release-assets.githubusercontent.com debian.org ubuntu.com launchpad.net letsencrypt.org cloudflare.com"
 mkdir -p "$ABUSE_DIR"
 
 # ---------- egress firewall (v4 + v6) ----------
@@ -1392,6 +1398,18 @@ CBEOF
     _write_wildcards
     return 0
 }
+_strip_infra() {
+    # Remove critical-infrastructure domains (and their subdomains) that an
+    # aggregated feed may have swept in. Runs on every enable/refresh, both
+    # fresh-download and reuse paths, so a bad feed can never break GitHub
+    # downloads (Xray install, script updates) or OS package mirrors.
+    [ -s "$BLOCK_HOSTS" ] || return 0
+    awk -v list="$INFRA_ALLOW" 'BEGIN { n=split(list,a," ") }
+        { keep=1
+          for (i=1;i<=n;i++) if ($2 == a[i] || index($2, "." a[i]) == length($2) - length(a[i])) { keep=0; break }
+          if (keep) print }' "$BLOCK_HOSTS" > "${BLOCK_HOSTS}.infra" \
+        && mv -f "${BLOCK_HOSTS}.infra" "$BLOCK_HOSTS"
+}
 fetch_blocklist() {
     # Aggregate the big maintained world databases per category:
     #   torrents/piracy — Blocklist Project torrent feed (tracker/index sites)
@@ -1417,6 +1435,7 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
        && [ $(( $(date +%s) - $(stat -c %Y "$BLOCK_HOSTS" 2>/dev/null || echo 0) )) -lt 86400 ] \
        && [ "$(grep -c . "$BLOCK_HOSTS")" -ge 10000 ]; then
         echo "  blocklist: reusing today's list ($(grep -c . "$BLOCK_HOSTS") domains) — use 'Refresh blocklist' to force an update"
+        _strip_infra
         _ensure_doh_block
         _ensure_custom_block
         return 0
@@ -1488,6 +1507,7 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
             && mv -f "${BLOCK_HOSTS}.wl" "$BLOCK_HOSTS"
     fi
     rm -f "$wl"
+    _strip_infra
     [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
     # Pin the anti-DoH bootstrap names last so the whitelist strip can't remove
     # them and they survive even if every feed failed.
