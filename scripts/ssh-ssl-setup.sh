@@ -854,7 +854,8 @@ fetch_blocklist() {
     #   torrents/piracy — Blocklist Project torrent feed (tracker/index sites)
     #                     + hagezi anti-piracy (torrent, DDL, warez, streaming
     #                       piracy — the broad "world" piracy database)
-    # All hosts-format feeds; merged, normalized and deduplicated. If every
+    # Mixed hosts-format and bare-domain feeds (awk below handles both);
+    # merged, normalized and deduplicated. If every
     # fetch fails, the previous blocklist is kept untouched.
     local urls="
 https://raw.githubusercontent.com/blocklistproject/Lists/master/torrent.txt
