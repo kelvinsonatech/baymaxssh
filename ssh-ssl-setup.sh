@@ -884,16 +884,17 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
         # listed most-important first, so a RAM cap trims the tail feeds, not
         # the torrent/carding core); emit dnsmasq hosts format.
         #
-        # RAM cap: dnsmasq keeps addn-hosts in memory (~150 bytes/entry with
-        # overhead). Loading more than the VPS can hold gets dnsmasq OOM-killed
-        # — and with port-53 enforcement active that would take DNS down for
-        # every tunnel user. Cap the list so dnsmasq never eats more than half
-        # of MemAvailable.
+        # RAM cap: dnsmasq keeps addn-hosts in memory (measured ~300+ bytes per
+        # entry with hash/cache overhead). Loading more than the VPS can hold
+        # gets dnsmasq OOM-killed or mute — and with port-53 enforcement active
+        # that would take DNS down for every tunnel user. Cap the list so
+        # dnsmasq never eats more than a quarter of MemAvailable.
         local mem_kb cap
         mem_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
         [ -n "$mem_kb" ] || mem_kb=1048576
-        cap=$(( mem_kb * 1024 / 2 / 150 ))
-        [ "$cap" -lt 200000 ] && cap=200000
+        cap=$(( mem_kb * 1024 / 4 / 300 ))
+        [ "$cap" -lt 100000 ] && cap=100000
+        echo "  blocklist: RAM-aware cap for this VPS: $cap domains"
         awk -v cap="$cap" '{ sub(/\r$/,"") }
              /^[[:space:]]*(#|$)/ { next }
              { d=$1
@@ -972,11 +973,18 @@ DNSEOF
     fi
     # Prove the filter actually answers 0.0.0.0 for a blocked domain before we
     # trust it — a huge addn-hosts file can load partially or be too big for RAM.
-    local canary ans
+    local canary ans try
     canary=$(grep -m1 -E '^0\.0\.0\.0 ' "$BLOCK_HOSTS" | awk '{print $2}')
     if [ -n "$canary" ]; then
-        ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 "$canary" @127.0.0.1; } 2>/dev/null | head -1)
-        [ -z "$ans" ] && command -v nslookup >/dev/null 2>&1 && ans=$(nslookup "$canary" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+        # dnsmasq parses the whole addn-hosts file before answering — on a big
+        # list / slow disk that takes a while. Poll up to ~45s before judging.
+        for try in 1 2 3 4 5 6 7 8 9; do
+            ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=3 +tries=1 "$canary" @127.0.0.1; } 2>/dev/null | head -1)
+            [ -z "$ans" ] && command -v nslookup >/dev/null 2>&1 && ans=$(nslookup "$canary" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+            [ "$ans" = "0.0.0.0" ] && break
+            echo "  content filter: waiting for dnsmasq to finish loading the list (${try}/9)..."
+            sleep 5
+        done
         if [ "$ans" != "0.0.0.0" ]; then
             echo "  content filter: dnsmasq is up but not blocking ($canary -> '${ans:-no answer}')."
             echo "  Refusing to enforce a broken filter — content filter disabled (fail-open)."
