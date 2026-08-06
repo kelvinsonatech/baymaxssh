@@ -1017,7 +1017,13 @@ watchdog() {
         [ -n "$ans" ] && exit 0
     else
         systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
-        systemctl is-active --quiet dnsmasq 2>/dev/null && exit 0
+        # "active" is not enough — a running-but-mute dnsmasq would still
+        # blackhole redirected DNS. Only trust an actual answer.
+        if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+            ans=$( { command -v dig >/dev/null 2>&1 && dig +short +time=2 +tries=1 google.com @127.0.0.1; } 2>/dev/null | head -1)
+            [ -z "$ans" ] && ans=$(nslookup google.com 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+            [ -n "$ans" ] && exit 0
+        fi
     fi
     # dnsmasq is dead or mute and won't come back — FAIL OPEN so user
     # protocols keep resolving. resolv.conf already lists 1.1.1.1 fallback.
