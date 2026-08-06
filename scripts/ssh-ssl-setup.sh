@@ -868,6 +868,43 @@ teardown_f2b() {
 }
 
 # ---------- content filter (dnsmasq, server-side, no client hijack) ----------
+# Curated DoH-provider bootstrap hostnames. Browsers (Chrome auto-upgrade,
+# Firefox, Brave, Edge) resolve these by NAME before switching DNS onto their
+# own encrypted channel over 443 — which would dodge this server-side filter
+# (the "open it from a Google result and it works" bypass). Returning 0.0.0.0
+# for the bootstrap names makes the DoH connection fail, so the browser falls
+# back to classic DNS (port 53), which is forced through the filter.
+# SAFE for the VPN's own path: this only poisons the DoH *hostnames*. HTTP
+# Custom bug hosts use raw IPs (1.1.1.1) or CDN SNIs, never these names, and
+# dnsmasq's own upstreams are configured by IP — so nothing here touches 443
+# or the tunnel proxy path.
+DOH_BOOTSTRAP="
+cloudflare-dns.com mozilla.cloudflare-dns.com chrome.cloudflare-dns.com
+security.cloudflare-dns.com family.cloudflare-dns.com one.one.one.one
+dns.google dns.google.com dns64.dns.google
+dns.quad9.net dns9.quad9.net dns10.quad9.net dns11.quad9.net dns12.quad9.net
+doh.opendns.com doh.familyshield.opendns.com
+dns.adguard.com dns-family.adguard.com dns-unfiltered.adguard.com
+dns.adguard-dns.com family.adguard-dns.com unfiltered.adguard-dns.com
+doh.cleanbrowsing.org doh.dns.sb dns.sb doh.mullvad.net dns.mullvad.net
+dns.nextdns.io firefox.dns.nextdns.io
+doh.libredns.gr ordns.he.net dns.digitale-gesellschaft.ch
+doh.applied-privacy.net resolver.dnscrypt.info fdns1.dismail.de
+doh.dnswarden.com jp.tiar.app doh.tiar.app
+dns.controld.com freedns.controld.com commons.host doh.crypto.sx
+dns.aa.net.uk dns.rubyfish.cn dns.twnic.tw dnsforge.de
+"
+# Ensure the anti-DoH names are always present in the blocklist, even when the
+# feed download is skipped/reused or every feed failed. Idempotent.
+_ensure_doh_block() {
+    local d added=0
+    for d in $DOH_BOOTSTRAP; do
+        grep -qi "^0\.0\.0\.0 ${d}\$" "$BLOCK_HOSTS" 2>/dev/null && continue
+        echo "0.0.0.0 $d" >> "$BLOCK_HOSTS"; added=1
+    done
+    [ "$added" = 1 ] && echo "  content filter: encrypted-DNS (DoH) bootstrap names pinned to filter"
+    return 0
+}
 fetch_blocklist() {
     # Aggregate the big maintained world databases per category:
     #   torrents/piracy — Blocklist Project torrent feed (tracker/index sites)
@@ -893,6 +930,7 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
        && [ $(( $(date +%s) - $(stat -c %Y "$BLOCK_HOSTS" 2>/dev/null || echo 0) )) -lt 86400 ] \
        && [ "$(grep -c . "$BLOCK_HOSTS")" -ge 10000 ]; then
         echo "  blocklist: reusing today's list ($(grep -c . "$BLOCK_HOSTS") domains) — use 'Refresh blocklist' to force an update"
+        _ensure_doh_block
         return 0
     fi
     # Download all feeds IN PARALLEL — serial fetches made enabling painfully
@@ -963,6 +1001,9 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
     fi
     rm -f "$wl"
     [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
+    # Pin the anti-DoH bootstrap names last so the whitelist strip can't remove
+    # them and they survive even if every feed failed.
+    _ensure_doh_block
     rm -f "$tmp"
 }
 restore_slowdns() {
@@ -1010,6 +1051,10 @@ server=1.1.1.1
 server=8.8.8.8
 cache-size=2000
 addn-hosts=$BLOCK_HOSTS
+# Firefox canary: answering NXDOMAIN here makes Firefox disable its built-in
+# DoH and fall back to the filtered system resolver (Mozilla's documented
+# network-admin opt-out signal).
+server=/use-application-dns.net/
 DNSEOF
     if ! free_53_for_dnsmasq; then
         echo "  content filter: could not coexist with SlowDNS on :53 — skipped"
@@ -1157,9 +1202,20 @@ selftest() {
         && echo "[ok] port-53 redirect (forwarded) installed" || echo "[--] forwarded redirect off (fine for proxy-only tunnels)"
     iptables -C OUTPUT -j ABUSE_DOH 2>/dev/null \
         && echo "[ok] DoH/DoT side-door blocks installed" || { echo "[!!] DoH/DoT blocks missing"; rc=1; }
+    # Anti-DoH: browsers dodge the filter by resolving over their own encrypted
+    # DNS. Verify a DoH bootstrap name is poisoned so they fall back to us.
+    local dohans
+    if command -v dig >/dev/null 2>&1; then
+        dohans=$(dig +short +time=2 +tries=1 dns.google @127.0.0.1 2>/dev/null | head -1)
+    else
+        dohans=$(nslookup dns.google 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+    fi
+    [ "$dohans" = "0.0.0.0" ] \
+        && echo "[ok] browser encrypted-DNS (DoH) bootstrap blocked — browsers fall back to the filter" \
+        || echo "[!!] DoH bootstrap not blocked (got '${dohans:-no answer}') — browsers may bypass the filter"
     echo "---------------------"
     [ "$rc" = 0 ] \
-        && echo "PASS — server-side filtering is active. If a site still opens for a user, their app is using its own encrypted DNS the tunnel can't see, or they aren't routing web traffic through this server." \
+        && echo "PASS — server-side filtering is active and browser encrypted-DNS (DoH) is forced back onto the filter. If a site still opens for a user, they aren't routing web traffic through this server, or they've manually hard-set a custom DoH resolver in the app." \
         || echo "FAIL — see [!!] lines above."
     return $rc
 }
