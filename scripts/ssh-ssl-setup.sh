@@ -3111,7 +3111,7 @@ cat > /usr/local/bin/ssh-web-panel.py <<'WEBEOF'
 # Light, single-file HTTPS admin site that mirrors the terminal menu.
 # Stdlib only. Runs as root (needs to manage system users).
 # ============================================================
-import os, sys, ssl, json, hmac, time, hashlib, subprocess, secrets, re, html
+import os, sys, ssl, json, hmac, time, hashlib, subprocess, secrets, re, html, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, quote as _q
 
@@ -3248,11 +3248,39 @@ def hb(n):
 def hspeed(bps):
     return hb(bps) + "/s"
 
+def _vpn_usernames():
+    names = set()
+    for line in read_file("/etc/passwd").splitlines():
+        parts = line.split(":")
+        if len(parts) >= 7 and is_vpn_user(parts[2], parts[6]):
+            names.add(parts[0])
+    return names
+
+def count_users_fast():
+    # One /etc/passwd scan + one ps call instead of chage/pgrep per user.
+    names = _vpn_usernames()
+    if not names:
+        return 0, 0
+    active = set(x.strip() for x in sh(["ps", "-eo", "user:32="]).stdout.split())
+    return len(names), len(names & active)
+
+_stats_cache = {"t": 0.0, "d": None}
+_stats_lock = threading.Lock()
+def cached_stats():
+    now = time.time()
+    with _stats_lock:
+        if _stats_cache["d"] and now - _stats_cache["t"] < 1.5:
+            return _stats_cache["d"]
+    d = collect_stats()
+    with _stats_lock:
+        _stats_cache["t"] = time.time(); _stats_cache["d"] = d
+    return d
+
 def collect_stats():
     idle1, tot1 = _cpu_sample()
     rx1 = read_int("/sys/class/net/%s/statistics/rx_bytes" % IFACE)
     tx1 = read_int("/sys/class/net/%s/statistics/tx_bytes" % IFACE)
-    time.sleep(0.3)
+    time.sleep(0.2)
     idle2, tot2 = _cpu_sample()
     rx2 = read_int("/sys/class/net/%s/statistics/rx_bytes" % IFACE)
     tx2 = read_int("/sys/class/net/%s/statistics/tx_bytes" % IFACE)
@@ -3270,18 +3298,18 @@ def collect_stats():
     except Exception:
         dt_tot = dt_used = 0
     load = read_file("/proc/loadavg").split()[:3] or ["0", "0", "0"]
-    users = list_users()
+    u_total, u_online = count_users_fast()
     return {
         "cpu": round(cpu, 2), "cores": cores,
         "mem_used": mu, "mem_total": mt, "mem_pct": round(mu / mt * 100, 2) if mt else 0,
         "swap_used": su, "swap_total": st, "swap_pct": round(su / st * 100, 2) if st else 0,
         "disk_used": dt_used, "disk_total": dt_tot, "disk_pct": round(dt_used / dt_tot * 100, 2) if dt_tot else 0,
-        "up": (tx2 - tx1) / 0.3, "down": (rx2 - rx1) / 0.3,
+        "up": (tx2 - tx1) / 0.2, "down": (rx2 - rx1) / 0.2,
         "net_out": tx2, "net_in": rx2,
         "tcp": _count_conns(["/proc/net/tcp", "/proc/net/tcp6"]),
         "udp": _count_conns(["/proc/net/udp", "/proc/net/udp6"]),
         "uptime": _uptime_fmt(), "load": " | ".join(load),
-        "users_total": len(users), "users_online": sum(1 for u in users if u["online"]),
+        "users_total": u_total, "users_online": u_online,
         "xray": svc_active("xray"), "xray_installed": os.path.exists("/usr/local/bin/xray"),
         "services": {s: svc_active(s) for s in SERVICES},
         "host": HOST_DISPLAY,
@@ -3650,7 +3678,7 @@ class H(BaseHTTPRequestHandler):
         if not self.authed():
             self._redirect("/login"); return
         if p == "/api/stats":
-            self._send(200, json.dumps(collect_stats()), "application/json"); return
+            self._send(200, json.dumps(cached_stats()), "application/json"); return
         q = parse_qs(urlparse(self.path).query)
         m = q.get("m", [""])[0]; e = q.get("e", [""])[0]
         views = {"/": lambda: view_dashboard(m), "": lambda: view_dashboard(m),
@@ -3739,6 +3767,7 @@ def main():
         ctx.load_cert_chain(certfile=pem)
     except Exception as e:
         sys.stderr.write("TLS cert load failed (%s): %s\n" % (pem, e)); sys.exit(1)
+    ThreadingHTTPServer.daemon_threads = True
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), H)
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     sys.stderr.write("SSH VPN web panel on :%d%s\n" % (PORT, PREFIX))
