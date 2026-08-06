@@ -55,3 +55,10 @@ enable must export sbin PATH / auto-install iptables, and after any installer
 update the user should toggle the module off/on to reapply rules. Verified
 passing end-to-end on the user's VPS (1.6M-domain blocklist, redirect + DoH
 blocks all [ok]).
+
+**Blocklist scope (Aug 6, 2026, user decision):** torrent/piracy ONLY — porn,
+betting, fraud/scam feeds removed at user request (only torrenting affects the
+server). Feeds: blocklistproject torrent.txt + hagezi anti-piracy
+(`wildcard/anti.piracy-onlydomains.txt` — the repo has NO `hosts/` dir; use
+wildcard onlydomains or dnsmasq formats). ~41k domains merged. Self-test canary
+is thepiratebay.org.

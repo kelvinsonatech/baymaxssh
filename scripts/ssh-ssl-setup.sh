@@ -851,21 +851,22 @@ teardown_f2b() {
 # ---------- content filter (dnsmasq, server-side, no client hijack) ----------
 fetch_blocklist() {
     # Aggregate the big maintained world databases per category:
-    #   porn      — StevenBlack, Blocklist Project, Sinfonietta
-    #   betting   — StevenBlack, Blocklist Project, Sinfonietta
-    #   torrents  — Blocklist Project (tracker/index sites; complements port block)
-    #   carding   — Blocklist Project fraud + scam feeds
-    # All hosts-format feeds; merged, normalized and deduplicated. If every
+    #   torrents/piracy — Blocklist Project torrent feed (tracker/index sites)
+    #                     + hagezi anti-piracy (torrent, DDL, warez, streaming
+    #                       piracy — the broad "world" piracy database)
+    #   carding         — Blocklist Project fraud + scam + phishing feeds
+    #   malicious       — hagezi Threat Intelligence Feeds (malware, phishing,
+    #                     scam, botnet/C2 — the aggregated "world" malicious DB)
+    # Mixed hosts-format and bare-domain feeds (awk below handles both);
+    # merged, normalized and deduplicated. If every
     # fetch fails, the previous blocklist is kept untouched.
     local urls="
-https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-gambling/hosts
-https://raw.githubusercontent.com/blocklistproject/Lists/master/porn.txt
-https://raw.githubusercontent.com/blocklistproject/Lists/master/gambling.txt
 https://raw.githubusercontent.com/blocklistproject/Lists/master/torrent.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
 https://raw.githubusercontent.com/blocklistproject/Lists/master/fraud.txt
 https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
-https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/pornography-hosts
-https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/gambling-hosts
+https://raw.githubusercontent.com/blocklistproject/Lists/master/phishing.txt
+https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
 "
     local tmp raw u ok=0
     tmp=$(mktemp); raw=$(mktemp)
@@ -1012,7 +1013,7 @@ status() {
 
 # Deep diagnostic — proves whether the filter is actually in the traffic path.
 selftest() {
-    local bad="pornhub.com" ans rc=0
+    local bad="thepiratebay.org" ans rc=0
     echo "abuse-guard self-test"
     echo "---------------------"
     systemctl is-active --quiet dnsmasq 2>/dev/null \
@@ -1324,6 +1325,24 @@ else
     [ -f /etc/xray/xray.crt ] || openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
         -subj "/CN=${HOST:-xray}" -out /etc/xray/xray.crt -keyout /etc/xray/xray.key >/dev/null 2>&1
     CERT=/etc/xray/xray.crt; KEY=/etc/xray/xray.key
+fi
+
+# Xray's stock systemd unit runs as a non-root user (usually 'nobody'), which
+# cannot read root-owned 0600 TLS keys — TLS inbounds then fail with
+# "failed to parse key: permission denied". Make the key readable by the
+# exact user the unit runs as. Letsencrypt keys live behind root-only
+# symlinks, so copy them into /etc/xray first (re-copied on every rebuild,
+# which also picks up renewals).
+XUSER=$(systemctl show -p User xray 2>/dev/null | cut -d= -f2)
+if [ -n "$XUSER" ] && [ "$XUSER" != root ]; then
+    case "$KEY" in
+        /etc/letsencrypt/*)
+            cp -L "$CERT" /etc/xray/xray-le.crt 2>/dev/null
+            cp -L "$KEY"  /etc/xray/xray-le.key 2>/dev/null
+            CERT=/etc/xray/xray-le.crt; KEY=/etc/xray/xray-le.key;;
+    esac
+    chown "$XUSER" "$CERT" "$KEY" 2>/dev/null
+    chmod 644 "$CERT" 2>/dev/null; chmod 600 "$KEY" 2>/dev/null
 fi
 
 # Emit one inbound. args: port proto clients net security path
@@ -2239,7 +2258,7 @@ abuse_menu() {
         /usr/local/bin/abuse-guard status | sed 's/^/  /'
         echo ""
         echo -e "  ${GR}Blocks spam(25) + torrent ports, caps floods/scans, fail2ban,${NC}"
-        echo -e "  ${GR}and betting/porn/malware DNS filtering. Bulk speed is untouched.${NC}"
+        echo -e "  ${GR}and torrent/piracy + carding/malware DNS filtering. Speed untouched.${NC}"
         echo ""
         menu_item "1" "🛡 " "Enable protection"   "$G"
         menu_item "2" "🧹" "Disable protection"   "$R"
