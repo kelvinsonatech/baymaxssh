@@ -871,16 +871,34 @@ https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
 https://raw.githubusercontent.com/blocklistproject/Lists/master/phishing.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
 "
-    local tmp raw u ok=0
-    tmp=$(mktemp); raw=$(mktemp)
+    # Fast path: if a non-trivial list was built in the last 24h, reuse it —
+    # re-enabling protection shouldn't re-download megabytes of feeds.
+    if [ "$1" != force ] && [ -s "$BLOCK_HOSTS" ] \
+       && [ $(( $(date +%s) - $(stat -c %Y "$BLOCK_HOSTS" 2>/dev/null || echo 0) )) -lt 86400 ] \
+       && [ "$(grep -c . "$BLOCK_HOSTS")" -ge 10000 ]; then
+        echo "  blocklist: reusing today's list ($(grep -c . "$BLOCK_HOSTS") domains) — use 'Refresh blocklist' to force an update"
+        return 0
+    fi
+    # Download all feeds IN PARALLEL — serial fetches made enabling painfully
+    # slow. Each feed gets its own file; order is preserved when merging so
+    # the RAM cap still trims the tail feeds first.
+    local tmp dldir u i=0 ok=0
+    tmp=$(mktemp); dldir=$(mktemp -d)
     for u in $urls; do
-        if curl -fsSL --max-time 180 "$u" -o "$raw" 2>/dev/null && [ -s "$raw" ]; then
-            cat "$raw" >> "$tmp"; echo >> "$tmp"; ok=1
+        i=$((i+1))
+        curl -fsSL --max-time 90 "$u" -o "$dldir/$i" 2>/dev/null &
+    done
+    wait
+    i=0
+    for u in $urls; do
+        i=$((i+1))
+        if [ -s "$dldir/$i" ]; then
+            cat "$dldir/$i" >> "$tmp"; echo >> "$tmp"; ok=1
         else
             echo "  blocklist: could not fetch $u (skipped)"
         fi
     done
-    rm -f "$raw"
+    rm -rf "$dldir"
     if [ "$ok" = 1 ]; then
         # Accept "0.0.0.0 dom" / "127.0.0.1 dom" / bare-domain lines; drop
         # comments and junk; lowercase; dedupe IN FEED ORDER (feeds above are
@@ -1146,7 +1164,7 @@ case "$1" in
         rm -f "$FLAG"; systemctl disable abuse-guard.service >/dev/null 2>&1
         echo "Abuse protection disabled — all rules removed, services restored." ;;
     refresh)
-        fetch_blocklist; systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
+        fetch_blocklist force; systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
         if [ -f /etc/dnsmasq.d/abuse-guard.conf ] && ! systemctl is-active --quiet dnsmasq; then
             echo "dnsmasq failed to load the new list — filter disabled (fail-open)."
             teardown_dns
