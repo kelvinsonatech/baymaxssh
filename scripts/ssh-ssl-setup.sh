@@ -2953,6 +2953,64 @@ chmod +x /usr/local/bin/menu
 success "Management panel installed — type 'menu' to open it"
 
 # ═══════════════════════════════════════════
+# LOGIN WATERMARK (MOTD) — shown on every SSH login / server open
+# ═══════════════════════════════════════════
+# Rendered live at login so host + service status are always current. Uses
+# Debian's pam_motd (update-motd.d) so it prints exactly once per login.
+: > /etc/motd 2>/dev/null || true                 # silence the stock Debian MOTD
+[ -f /etc/legal ] && : > /etc/legal 2>/dev/null   # drop the "unauthorized use" notice
+sed -i 's/^#\?PrintLastLog.*/PrintLastLog yes/' /etc/ssh/sshd_config 2>/dev/null || true
+mkdir -p /etc/update-motd.d
+# Remove Debian/Ubuntu default motd fragments so only our watermark shows.
+find /etc/update-motd.d -maxdepth 1 -type f ! -name '00-litronx' -exec chmod -x {} \; 2>/dev/null || true
+cat > /etc/update-motd.d/00-litronx <<'MOTDEOF'
+#!/bin/bash
+# Branded login watermark for the SSH-VPN server.
+NC='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
+TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINK='\033[38;5;213m'
+LIME='\033[38;5;155m'; GRY='\033[38;5;240m'; W='\033[97m'; Y='\033[1;33m'; G='\033[1;32m'; R='\033[1;31m'
+CONF_DIR=/etc/ssh-panel
+DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+SERVER_IP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
+HOST_DISPLAY="${DOMAIN:-${SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}}"
+UP=$(uptime -p 2>/dev/null | sed 's/^up //'); [ -z "$UP" ] && UP="just now"
+NOW=$(date '+%a %d %b %Y · %H:%M')
+users_total=0
+[ -f "$CONF_DIR/users.list" ] && users_total=$(grep -c . "$CONF_DIR/users.list" 2>/dev/null)
+online=$(who 2>/dev/null | wc -l)
+svc=""
+for s in ssh dropbear ws-proxy stunnel4 xray dnsmasq; do
+    if systemctl is-active --quiet "$s" 2>/dev/null; then svc+=" ${G}●${NC}${GRY}${s}${NC}"; else svc+=" ${R}○${NC}${GRY}${s}${NC}"; fi
+done
+echo ""
+echo -e "  ${TEAL}${BOLD} ██╗     ██╗████████╗██████╗  ██████╗ ███╗   ██╗██╗  ██╗${NC}"
+echo -e "  ${TEAL}${BOLD} ██║     ██║╚══██╔══╝██╔══██╗██╔═══██╗████╗  ██║╚██╗██╔╝${NC}"
+echo -e "  ${SKY}${BOLD} ██║     ██║   ██║   ██████╔╝██║   ██║██╔██╗ ██║ ╚███╔╝ ${NC}"
+echo -e "  ${SKY}${BOLD} ██║     ██║   ██║   ██╔══██╗██║   ██║██║╚██╗██║ ██╔██╗ ${NC}"
+echo -e "  ${PINK}${BOLD} ███████╗██║   ██║   ██║  ██║╚██████╔╝██║ ╚████║██╔╝ ██╗${NC}"
+echo -e "  ${PINK}${BOLD} ╚══════╝╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝${NC}"
+echo -e "        ${GRY}ws · ssl · openssh · dropbear · v2ray  ${W}${BOLD}VPN SERVER${NC}"
+echo ""
+echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
+printf "  ${TEAL}│${NC}  ${GRY}HOST${NC}    ${W}${BOLD}%-44s${NC}${TEAL}│${NC}\n" "$HOST_DISPLAY"
+printf "  ${TEAL}│${NC}  ${GRY}TIME${NC}    ${W}%-44s${NC}${TEAL}│${NC}\n" "$NOW"
+printf "  ${TEAL}│${NC}  ${GRY}UPTIME${NC}  ${W}%-44s${NC}${TEAL}│${NC}\n" "$UP"
+printf "  ${TEAL}│${NC}  ${GRY}USERS${NC}   ${LIME}%-3s${NC} ${GRY}accounts${NC}   ${Y}%-3s${NC} ${GRY}online%-19s${NC}${TEAL}│${NC}\n" "$users_total" "$online" ""
+echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${TEAL}│${NC} ${GRY}svc${NC}${svc}${TEAL}│${NC}"
+echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo -e "        ${GRY}type${NC} ${W}${BOLD}menu${NC} ${GRY}to open the control panel${NC}"
+echo ""
+MOTDEOF
+chmod +x /etc/update-motd.d/00-litronx
+# OpenSSH on Debian renders update-motd.d through pam_motd; make sure the
+# static-motd printer is also enabled so pam runs the dynamic scripts.
+grep -q 'pam_motd.so motd=/run/motd.dynamic' /etc/pam.d/sshd 2>/dev/null || true
+# Pre-render once so it's visible immediately even before the first pam refresh.
+/etc/update-motd.d/00-litronx > /run/motd.dynamic 2>/dev/null || true
+success "Login watermark installed — shows on every server login"
+
+# ═══════════════════════════════════════════
 # DEFAULT SSH USERS (auto-created)
 # ═══════════════════════════════════════════
 phase "Default users"
