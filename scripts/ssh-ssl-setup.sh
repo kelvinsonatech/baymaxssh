@@ -673,6 +673,11 @@ SLOWDNS_BAK="$ABUSE_DIR/slowdns.service.orig"
 BLOCK_HOSTS="$ABUSE_DIR/blocklist.hosts"
 # Default P2P/DHT/tracker ports (6969 falls inside 6881:6999).
 TORRENT_PORTS="2710,6881:6999,51413"
+# Stable well-known DHT bootstrap node IPs (router.bittorrent.com,
+# router.utorrent.com, dht.transmissionbt.com). Torrent clients that ignore the
+# DNS filter fall back to these hard-coded addresses to bootstrap DHT — dropping
+# NEW packets to them kills peer discovery. v4 only; harmless if an IP rotates.
+DHT_BOOTSTRAP_IPS="67.215.246.10 82.221.103.244 87.98.162.88 87.98.162.89"
 mkdir -p "$ABUSE_DIR"
 
 # ---------- egress firewall (v4 + v6) ----------
@@ -692,6 +697,16 @@ _fw_build() {   # $1 = iptables | ip6tables
     # Torrent: block default P2P/DHT ports (best effort; encrypted BT evades).
     "$ipt" -A $CHAIN -p tcp -m multiport --dports $TORRENT_PORTS -j DROP
     "$ipt" -A $CHAIN -p udp -m multiport --dports $TORRENT_PORTS -j DROP
+    # DHT bootstrap node IPs (clients that skip DNS fall back to these hard-coded
+    # addresses). Placed AFTER the ESTABLISHED RETURN above, so only the first
+    # UDP/TCP packet of a NEW flow is checked — zero cost to existing throughput.
+    # v4 only; these are the stable well-known DHT routers.
+    if [ "$ipt" = iptables ]; then
+        local dhtip
+        for dhtip in $DHT_BOOTSTRAP_IPS; do
+            "$ipt" -A $CHAIN -d "$dhtip" -j DROP
+        done
+    fi
     # Let DNS pass untouched.
     "$ipt" -A $CHAIN -p udp --dport 53 -j RETURN
     "$ipt" -A $CHAIN -p tcp --dport 53 -j RETURN
@@ -1327,6 +1342,43 @@ x1337x.cc
 1337x.mirrorbay.top
 1337x.privacyfriendly.xyz
 1337x.torlock.icu
+# ---- Public trackers + DHT bootstrap (peer discovery) ----
+# Torrent clients find peers through these even when the index SITE is blocked.
+# Killing tracker + DHT name resolution stops downloads regardless of the app
+# (uTorrent, qBittorrent, IDM's torrent plugin, etc.) with zero speed cost.
+router.bittorrent.com
+router.utorrent.com
+dht.transmissionbt.com
+router.bitcomet.com
+dht.libtorrent.org
+dht.aelitis.com
+bttracker.debian.org
+tracker.opentrackr.org
+tracker.openbittorrent.com
+open.demonii.com
+open.demonii.si
+open.stealth.si
+open.tracker.cl
+tracker.torrent.eu.org
+tracker.dler.org
+tracker.moeking.me
+tracker.tiny-vps.com
+tracker.internetwarriors.net
+tracker.leechers-paradise.org
+tracker.coppersurfer.tk
+tracker.zer0day.to
+tracker.pirateparty.gr
+tracker.cyberia.is
+exodus.desync.com
+explodie.org
+retracker.lanta-net.ru
+9.rarbg.com
+9.rarbg.me
+9.rarbg.to
+tracker.gbitt.info
+opentracker.i2p.rocks
+tracker.tallpenguin.org
+tracker.bt4g.com
 CBEOF
     local added
     added=$(awk 'FNR==NR { if ($1=="0.0.0.0") have[$2]=1; next }
