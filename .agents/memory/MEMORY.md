@@ -2,4 +2,5 @@
 - [Xray port allocator & 443 handover](xray-port-allocator.md) — shared vmess/vless/trojan port scheme; 443 protocol must be ACTIVE; never call _alloc via $(...) (subshell drops reservations).
 - [abuse-guard anti-abuse module](abuse-guard.md) — menu-toggled egress firewall/fail2ban/torrent/DNS filter; RETURN on ESTABLISHED first (zero speed cost); ownership ledger; transaction-safe SlowDNS :53 rebind.
 - [WS/SSH proxy payload handling](ws-ssh-proxy-payload.md) — reply 100-continue then strip HTTP junk up to the SSH- banner before bridging; else two-stage payloads corrupt the handshake.
+- [Browser DoH bypass](abuse-guard-doh-bypass.md) — Google-result bypass = browser DoH on 443; poison ~45 DoH bootstrap hostnames + Firefox canary NXDOMAIN, never touch 443.
 - [SlowDNS UDP 53](slowdns-udp53.md) — dnstt silently fails unless port 53 is freed (disable systemd-resolved stub); verify is-active after start.
