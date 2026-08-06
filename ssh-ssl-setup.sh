@@ -850,22 +850,15 @@ teardown_f2b() {
 
 # ---------- content filter (dnsmasq, server-side, no client hijack) ----------
 fetch_blocklist() {
-    # Aggregate the big maintained world databases per category:
-    #   porn      — StevenBlack, Blocklist Project, Sinfonietta
-    #   betting   — StevenBlack, Blocklist Project, Sinfonietta
-    #   torrents  — Blocklist Project (tracker/index sites; complements port block)
-    #   carding   — Blocklist Project fraud + scam feeds
+    # Aggregate the big maintained world torrent/piracy databases:
+    #   torrents/piracy — Blocklist Project torrent feed (tracker/index sites)
+    #                     + hagezi anti-piracy (torrent, DDL, warez, streaming
+    #                       piracy — the broad "world" piracy database)
     # All hosts-format feeds; merged, normalized and deduplicated. If every
     # fetch fails, the previous blocklist is kept untouched.
     local urls="
-https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn-gambling/hosts
-https://raw.githubusercontent.com/blocklistproject/Lists/master/porn.txt
-https://raw.githubusercontent.com/blocklistproject/Lists/master/gambling.txt
 https://raw.githubusercontent.com/blocklistproject/Lists/master/torrent.txt
-https://raw.githubusercontent.com/blocklistproject/Lists/master/fraud.txt
-https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
-https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/pornography-hosts
-https://raw.githubusercontent.com/Sinfonietta/hostfiles/master/gambling-hosts
+https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
 "
     local tmp raw u ok=0
     tmp=$(mktemp); raw=$(mktemp)
@@ -1012,7 +1005,7 @@ status() {
 
 # Deep diagnostic — proves whether the filter is actually in the traffic path.
 selftest() {
-    local bad="pornhub.com" ans rc=0
+    local bad="thepiratebay.org" ans rc=0
     echo "abuse-guard self-test"
     echo "---------------------"
     systemctl is-active --quiet dnsmasq 2>/dev/null \
@@ -2239,7 +2232,7 @@ abuse_menu() {
         /usr/local/bin/abuse-guard status | sed 's/^/  /'
         echo ""
         echo -e "  ${GR}Blocks spam(25) + torrent ports, caps floods/scans, fail2ban,${NC}"
-        echo -e "  ${GR}and betting/porn/malware DNS filtering. Bulk speed is untouched.${NC}"
+        echo -e "  ${GR}and torrent/piracy-site DNS filtering. Bulk speed is untouched.${NC}"
         echo ""
         menu_item "1" "🛡 " "Enable protection"   "$G"
         menu_item "2" "🧹" "Disable protection"   "$R"
