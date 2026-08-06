@@ -905,6 +905,19 @@ _ensure_doh_block() {
     [ "$added" = 1 ] && echo "  content filter: encrypted-DNS (DoH) bootstrap names pinned to filter"
     return 0
 }
+# Subdomain-wide blocking: plain hosts entries match EXACT hostnames only,
+# so www.1337x.to or any mirror subdomain slipped straight past the filter.
+# dnsmasq "address=/dom/0.0.0.0" wildcards block the domain AND every
+# subdomain under it. Only the curated sites + DoH names go here (~500
+# lines, negligible RAM) — the multi-million-entry feed stays in addn-hosts.
+_write_wildcards() {
+    mkdir -p /etc/dnsmasq.d 2>/dev/null
+    {
+        local d
+        for d in $DOH_BOOTSTRAP; do echo "address=/$d/0.0.0.0"; done
+        [ -s "$ABUSE_DIR/curated.list" ] && awk 'NF{print "address=/" $1 "/0.0.0.0"}' "$ABUSE_DIR/curated.list"
+    } > /etc/dnsmasq.d/abuse-guard-wild.conf 2>/dev/null || true
+}
 # Admin-curated well-known torrent sites & proxy mirrors — always blocked,
 # ships inside the script so every install has them even if feeds fail.
 _ensure_custom_block() {
@@ -1318,8 +1331,13 @@ CBEOF
     local added
     added=$(awk 'FNR==NR { if ($1=="0.0.0.0") have[$2]=1; next }
          !($1 in have) { print "0.0.0.0 " $1 }' "$BLOCK_HOSTS" "$cl" | tee -a "$BLOCK_HOSTS" | wc -l)
+    mkdir -p "$ABUSE_DIR" 2>/dev/null
+    cp -f "$cl" "$ABUSE_DIR/curated.list" 2>/dev/null
     rm -f "$cl"
     [ "$added" -gt 0 ] && echo "  content filter: $added curated torrent-site domains pinned to filter"
+    # Regenerate the subdomain wildcards so mirrors like www.1337x.to are
+    # blocked too (picked up on the next dnsmasq restart in setup/refresh).
+    _write_wildcards
     return 0
 }
 fetch_blocklist() {
@@ -1477,7 +1495,7 @@ server=/use-application-dns.net/
 DNSEOF
     if ! free_53_for_dnsmasq; then
         echo "  content filter: could not coexist with SlowDNS on :53 — skipped"
-        rm -f /etc/dnsmasq.d/abuse-guard.conf; return 1
+        rm -f /etc/dnsmasq.d/abuse-guard.conf /etc/dnsmasq.d/abuse-guard-wild.conf; return 1
     fi
     systemctl enable dnsmasq >/dev/null 2>&1
     systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
@@ -1558,7 +1576,7 @@ watchdog() {
 teardown_dns() {
     remove_dnsforce
     rm -f /etc/cron.d/abuse-guard-watchdog
-    rm -f /etc/dnsmasq.d/abuse-guard.conf
+    rm -f /etc/dnsmasq.d/abuse-guard.conf /etc/dnsmasq.d/abuse-guard-wild.conf
     # Restore resolv.conf FIRST so name resolution never depends on our resolver.
     [ -f "$RESOLV_BAK" ] && { cp -f "$RESOLV_BAK" /etc/resolv.conf; rm -f "$RESOLV_BAK"; }
     if [ -f "$ABUSE_DIR/owns_dnsmasq" ]; then
@@ -1632,6 +1650,16 @@ selftest() {
     [ "$dohans" = "0.0.0.0" ] \
         && echo "[ok] browser encrypted-DNS (DoH) bootstrap blocked — browsers fall back to the filter" \
         || echo "[!!] DoH bootstrap not blocked (got '${dohans:-no answer}') — browsers may bypass the filter"
+    # Wildcards: any subdomain of a curated site must be blocked too.
+    local subans
+    if command -v dig >/dev/null 2>&1; then
+        subans=$(dig +short +time=2 +tries=1 "www.$bad" @127.0.0.1 2>/dev/null | head -1)
+    else
+        subans=$(nslookup "www.$bad" 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+    fi
+    [ "$subans" = "0.0.0.0" ] \
+        && echo "[ok] subdomains blocked too (www.$bad -> 0.0.0.0)" \
+        || { echo "[!!] subdomain NOT blocked (www.$bad -> '${subans:-no answer}')"; rc=1; }
     echo "---------------------"
     [ "$rc" = 0 ] \
         && echo "PASS — server-side filtering is active and browser encrypted-DNS (DoH) is forced back onto the filter. If a site still opens for a user, they aren't routing web traffic through this server, or they've manually hard-set a custom DoH resolver in the app." \
