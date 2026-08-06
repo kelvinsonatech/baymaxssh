@@ -2965,6 +2965,22 @@ web_activate() {
     secret=$(openssl rand -hex 16)
     hash=$(python3 -c "import hashlib,sys;print(hashlib.sha256((sys.argv[1]+sys.argv[2]).encode()).hexdigest())" "$salt" "$wpass")
     mkdir -p "$CONF_DIR"
+    # Dedicated TLS cert with the server IP/domain in SAN so Chrome/Firefox
+    # will actually open the link (a plain CN cert on a bare IP gets blocked
+    # with no "Proceed" option). Prefer a real Let's Encrypt cert if present.
+    local wcert=/etc/ssh-panel/web.pem sip wdom san
+    sip=$(cat "$CONF_DIR/ip.conf" 2>/dev/null); [ -z "$sip" ] && sip=$(curl -s4 ifconfig.me 2>/dev/null)
+    wdom=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
+    if [ -n "$wdom" ] && [ -f "/etc/letsencrypt/live/$wdom/fullchain.pem" ]; then
+        cat "/etc/letsencrypt/live/$wdom/fullchain.pem" "/etc/letsencrypt/live/$wdom/privkey.pem" > "$wcert"
+    else
+        san="IP:${sip}"; [ -n "$wdom" ] && san="DNS:${wdom},${san}"
+        openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+            -subj "/CN=${wdom:-$sip}" -addext "subjectAltName=${san}" \
+            -out "$wcert" -keyout "${wcert}.key" >/dev/null 2>&1
+        cat "${wcert}.key" >> "$wcert" && rm -f "${wcert}.key"
+    fi
+    chmod 600 "$wcert"
     cat > "$WEB_CONF" <<WC
 PORT=$port
 PATH=$wpath
@@ -2973,6 +2989,7 @@ SALT=$salt
 PASS_HASH=$hash
 SECRET=$secret
 PASS_PLAIN=$wpass
+CERT=$wcert
 WC
     chmod 600 "$WEB_CONF"
     cat > "$WEB_UNIT" <<UNIT
@@ -3090,32 +3107,32 @@ success "Management panel installed — type 'menu' to open it"
 cat > /usr/local/bin/ssh-web-panel.py <<'WEBEOF'
 #!/usr/bin/env python3
 # ============================================================
-# SSH VPN — Web Control Panel
-# A light, single-file HTTPS admin site that mirrors the terminal menu.
-# Activated from the menu ("Activate website"). Runs as root (needs to
-# manage system users). Stdlib only — no frameworks, negligible footprint.
+# SSH VPN — Web Control Panel (3x-ui-style UI, live gauges)
+# Light, single-file HTTPS admin site that mirrors the terminal menu.
+# Stdlib only. Runs as root (needs to manage system users).
 # ============================================================
 import os, sys, ssl, json, hmac, time, hashlib, subprocess, secrets, re, html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote as _q
 
 CONF_DIR = "/etc/ssh-panel"
 WEB_CONF = os.path.join(CONF_DIR, "web.conf")
-STUNNEL_PEM = "/etc/stunnel/stunnel.pem"
 XACC = "/etc/xray/accounts.txt"
+
+def read_file(p):
+    try:
+        with open(p) as f:
+            return f.read()
+    except Exception:
+        return ""
 
 def load_conf():
     c = {}
-    try:
-        with open(WEB_CONF) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                c[k.strip()] = v.strip()
-    except FileNotFoundError:
-        pass
+    for line in read_file(WEB_CONF).splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            c[k.strip()] = v.strip()
     return c
 
 CONF = load_conf()
@@ -3127,13 +3144,7 @@ ADMIN_USER = CONF.get("USER", "admin")
 PASS_HASH = CONF.get("PASS_HASH", "")
 SALT = CONF.get("SALT", "")
 SECRET = CONF.get("SECRET", secrets.token_hex(16)).encode()
-
-def read_file(p):
-    try:
-        with open(p) as f:
-            return f.read()
-    except Exception:
-        return ""
+WEB_CERT = CONF.get("CERT", "/etc/ssh-panel/web.pem")
 
 def cfg(name):
     return read_file(os.path.join(CONF_DIR, name)).strip()
@@ -3144,14 +3155,13 @@ HOST_DISPLAY = DOMAIN or SERVER_IP or "server"
 IFACE = cfg("iface.conf")
 if not IFACE:
     try:
-        out = subprocess.run(["ip", "route"], capture_output=True, text=True).stdout
-        for l in out.splitlines():
+        for l in subprocess.run(["ip", "route"], capture_output=True, text=True).stdout.splitlines():
             if l.startswith("default"):
                 IFACE = l.split()[4]; break
     except Exception:
         IFACE = "eth0"
 
-# ---------- helpers that mirror the terminal menu exactly ----------
+# ---------- system helpers ----------
 def sh(args):
     try:
         return subprocess.run(args, capture_output=True, text=True, timeout=120)
@@ -3175,48 +3185,12 @@ def list_users():
         if not is_vpn_user(uid, shell):
             continue
         exp = "-"
-        r = sh(["chage", "-l", name])
-        for l in r.stdout.splitlines():
+        for l in sh(["chage", "-l", name]).stdout.splitlines():
             if "Account expires" in l:
-                exp = l.split(":", 1)[1].strip()
-                break
-        online = sh(["pgrep", "-u", name]).returncode == 0
-        sessions = len([x for x in sh(["pgrep", "-u", name]).stdout.split() if x])
-        users.append({"name": name, "exp": exp, "online": online, "sessions": sessions})
+                exp = l.split(":", 1)[1].strip(); break
+        pg = sh(["pgrep", "-u", name]).stdout.split()
+        users.append({"name": name, "exp": exp, "online": bool(pg), "sessions": len(pg)})
     return users
-
-def count_online():
-    return sum(1 for u in list_users() if u["online"])
-
-def bw_scope(scope):
-    try:
-        r = sh(["vnstat", "-i", IFACE, "--json"])
-        t = json.loads(r.stdout)["interfaces"][0]["traffic"]
-        if scope == "all":
-            e = t.get("total", {})
-        elif scope == "day":
-            e = (t.get("day") or [{}])[-1]
-        else:
-            e = (t.get("month") or [{}])[-1]
-        rx = int(e.get("rx", 0)); tx = int(e.get("tx", 0))
-        return rx, tx, rx + tx
-    except Exception:
-        if scope == "all":
-            try:
-                rx = int(read_file("/sys/class/net/%s/statistics/rx_bytes" % IFACE) or 0)
-                tx = int(read_file("/sys/class/net/%s/statistics/tx_bytes" % IFACE) or 0)
-                return rx, tx, rx + tx
-            except Exception:
-                pass
-        return 0, 0, 0
-
-def hb(n):
-    n = float(n or 0)
-    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
-        if n < 1024 or unit == "PB":
-            return ("%.2f %s" % (n, unit)) if unit != "B" else ("%d B" % n)
-        n /= 1024
-    return "%d B" % n
 
 SERVICES = ["ssh", "dropbear", "ws-proxy", "stunnel4", "xray", "dnsmasq"]
 def svc_active(s):
@@ -3225,11 +3199,98 @@ def svc_active(s):
 def valid_name(n):
     return bool(re.match(r"^[a-z_][a-z0-9_-]{0,31}$", n or ""))
 
-# ---------- session auth ----------
+def read_int(p):
+    try:
+        return int(read_file(p).strip() or 0)
+    except Exception:
+        return 0
+
+def _cpu_sample():
+    try:
+        n = list(map(int, read_file("/proc/stat").splitlines()[0].split()[1:]))
+        idle = n[3] + (n[4] if len(n) > 4 else 0)
+        return idle, sum(n)
+    except Exception:
+        return 0, 0
+
+def _meminfo():
+    d = {}
+    for l in read_file("/proc/meminfo").splitlines():
+        p = l.split(":")
+        if len(p) == 2:
+            d[p[0]] = int(p[1].strip().split()[0]) * 1024
+    return d
+
+def _count_conns(paths):
+    c = 0
+    for p in paths:
+        lines = read_file(p).splitlines()
+        c += max(0, len(lines) - 1)
+    return c
+
+def _uptime_fmt():
+    try:
+        s = int(float(read_file("/proc/uptime").split()[0]))
+    except Exception:
+        return "-"
+    d, s = divmod(s, 86400); h, s = divmod(s, 3600); m, _ = divmod(s, 60)
+    if d: return "%dd %dh" % (d, h)
+    if h: return "%dh %dm" % (h, m)
+    return "%dm" % m
+
+def hb(n):
+    n = float(n or 0)
+    for u in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1024 or u == "PB":
+            return ("%.2f %s" % (n, u)) if u != "B" else ("%d B" % n)
+        n /= 1024
+
+def hspeed(bps):
+    return hb(bps) + "/s"
+
+def collect_stats():
+    idle1, tot1 = _cpu_sample()
+    rx1 = read_int("/sys/class/net/%s/statistics/rx_bytes" % IFACE)
+    tx1 = read_int("/sys/class/net/%s/statistics/tx_bytes" % IFACE)
+    time.sleep(0.3)
+    idle2, tot2 = _cpu_sample()
+    rx2 = read_int("/sys/class/net/%s/statistics/rx_bytes" % IFACE)
+    tx2 = read_int("/sys/class/net/%s/statistics/tx_bytes" % IFACE)
+    dt = tot2 - tot1
+    cpu = 0.0 if dt <= 0 else max(0.0, min(100.0, (1 - (idle2 - idle1) / dt) * 100))
+    cores = read_file("/proc/cpuinfo").count("processor\t")
+    m = _meminfo()
+    mt = m.get("MemTotal", 0); ma = m.get("MemAvailable", 0); mu = mt - ma
+    st = m.get("SwapTotal", 0); sf = m.get("SwapFree", 0); su = st - sf
+    try:
+        v = os.statvfs("/")
+        dt_tot = v.f_blocks * v.f_frsize
+        dt_free = v.f_bavail * v.f_frsize
+        dt_used = dt_tot - dt_free
+    except Exception:
+        dt_tot = dt_used = 0
+    load = read_file("/proc/loadavg").split()[:3] or ["0", "0", "0"]
+    users = list_users()
+    return {
+        "cpu": round(cpu, 2), "cores": cores,
+        "mem_used": mu, "mem_total": mt, "mem_pct": round(mu / mt * 100, 2) if mt else 0,
+        "swap_used": su, "swap_total": st, "swap_pct": round(su / st * 100, 2) if st else 0,
+        "disk_used": dt_used, "disk_total": dt_tot, "disk_pct": round(dt_used / dt_tot * 100, 2) if dt_tot else 0,
+        "up": (tx2 - tx1) / 0.3, "down": (rx2 - rx1) / 0.3,
+        "net_out": tx2, "net_in": rx2,
+        "tcp": _count_conns(["/proc/net/tcp", "/proc/net/tcp6"]),
+        "udp": _count_conns(["/proc/net/udp", "/proc/net/udp6"]),
+        "uptime": _uptime_fmt(), "load": " | ".join(load),
+        "users_total": len(users), "users_online": sum(1 for u in users if u["online"]),
+        "xray": svc_active("xray"), "xray_installed": os.path.exists("/usr/local/bin/xray"),
+        "services": {s: svc_active(s) for s in SERVICES},
+        "host": HOST_DISPLAY,
+    }
+
+# ---------- auth ----------
 def make_token():
     exp = str(int(time.time()) + 8 * 3600)
-    sig = hmac.new(SECRET, exp.encode(), hashlib.sha256).hexdigest()
-    return exp + "." + sig
+    return exp + "." + hmac.new(SECRET, exp.encode(), hashlib.sha256).hexdigest()
 
 def check_token(tok):
     try:
@@ -3245,155 +3306,238 @@ def check_login(user, pw):
     h = hashlib.sha256((SALT + pw).encode()).hexdigest()
     return hmac.compare_digest(h, PASS_HASH)
 
-# ---------- HTML ----------
-CSS = """
-:root{--bg1:#0b1220;--bg2:#111c33;--card:#0f1b30;--line:#1e2f4d;--tx:#e8eef8;--mut:#8aa0c2;
---teal:#2dd4bf;--sky:#38bdf8;--indigo:#818cf8;--pink:#f472b6;--grn:#34d399;--red:#f87171;--amber:#fbbf24}
+# ---------- UI ----------
+CSS = r"""
+:root{
+ --bg:#eef2f6;--panel:#ffffff;--ink:#243244;--mut:#7c8aa0;--line:#e7ecf2;
+ --teal:#0fae96;--teal2:#14c8ad;--sky:#3aa0f2;--indigo:#6a7bf0;--pink:#f472b6;
+ --grn:#22c55e;--red:#ef4444;--amber:#f59e0b;--track:#eef1f5;
+ --shadow:0 10px 30px rgba(35,50,68,.08);--radius:18px;
+}
+[data-theme=dark]{
+ --bg:#0b1220;--panel:#101c31;--ink:#e8eef8;--mut:#8ba0bf;--line:#1d2d49;
+ --track:#17233b;--shadow:0 20px 50px rgba(0,0,0,.45);
+}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-background:radial-gradient(1200px 600px at 80% -10%,#16305a 0,var(--bg1) 55%) fixed;color:var(--tx);min-height:100vh}
-a{color:var(--sky);text-decoration:none}
-.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.card{background:linear-gradient(180deg,rgba(45,212,191,.06),rgba(129,140,248,.04)),var(--card);
-border:1px solid var(--line);border-radius:22px;box-shadow:0 30px 80px rgba(0,0,0,.45)}
-.login{width:100%;max-width:380px;padding:38px 32px}
-.brand{display:flex;flex-direction:column;align-items:center;gap:6px;margin-bottom:22px}
-.brand .logo{font-weight:800;font-size:26px;letter-spacing:.5px;
-background:linear-gradient(90deg,var(--teal),var(--sky),var(--indigo));-webkit-background-clip:text;background-clip:text;color:transparent}
-.brand .sub{color:var(--mut);font-size:12px;letter-spacing:2px;text-transform:uppercase}
-label{display:block;font-size:12px;color:var(--mut);margin:14px 0 6px}
-input{width:100%;padding:13px 14px;background:#0a1526;border:1px solid var(--line);border-radius:12px;color:var(--tx);font-size:15px;outline:none}
-input:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(45,212,191,.15)}
-.btn{width:100%;margin-top:20px;padding:13px;border:0;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;
-background:linear-gradient(90deg,var(--teal),var(--sky));color:#04121f}
-.btn:hover{filter:brightness(1.07)}
-.btn.sm{width:auto;margin:0;padding:8px 14px;font-size:13px;border-radius:10px}
-.btn.red{background:linear-gradient(90deg,#fb7185,#f43f5e);color:#fff}
-.btn.ghost{background:#12203a;color:var(--tx);border:1px solid var(--line)}
-.err{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.4);color:#fecaca;padding:10px 12px;border-radius:10px;font-size:13px;margin-top:8px}
-.ok{background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.4);color:#bbf7d0;padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:14px}
+ background:var(--bg);color:var(--ink);min-height:100vh;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+/* login */
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;
+ background:radial-gradient(900px 500px at 50% -10%,rgba(15,174,150,.18),transparent 60%),var(--bg)}
+.login{width:100%;max-width:400px;background:var(--panel);border-radius:26px;box-shadow:var(--shadow);padding:42px 34px;
+ animation:pop .5s cubic-bezier(.2,.8,.2,1)}
+@keyframes pop{from{opacity:0;transform:translateY(14px) scale(.98)}to{opacity:1;transform:none}}
+.login h1{text-align:center;font-size:30px;font-weight:800;margin-bottom:6px}
+.login .sub{text-align:center;color:var(--mut);font-size:12px;letter-spacing:2px;text-transform:uppercase;margin-bottom:26px}
+.inp{display:flex;align-items:center;gap:10px;border:1.5px solid var(--line);border-radius:14px;padding:0 14px;margin-top:14px;
+ transition:border-color .2s,box-shadow .2s;background:var(--panel)}
+.inp:focus-within{border-color:var(--teal);box-shadow:0 0 0 4px rgba(15,174,150,.14)}
+.inp svg{flex:none;color:var(--mut)}
+.inp input{flex:1;border:0;outline:0;background:transparent;color:var(--ink);font-size:15px;padding:14px 0}
+.eye{cursor:pointer;color:var(--mut)}
+.btn{width:100%;margin-top:22px;padding:14px;border:0;border-radius:14px;font-size:15px;font-weight:700;cursor:pointer;color:#fff;
+ background:linear-gradient(90deg,var(--teal),var(--teal2));box-shadow:0 8px 20px rgba(15,174,150,.35);transition:transform .1s,filter .2s}
+.btn:hover{filter:brightness(1.05)} .btn:active{transform:translateY(1px)}
+.btn.sm{width:auto;margin:0;padding:8px 14px;font-size:13px;border-radius:10px;box-shadow:none}
+.btn.ghost{background:var(--track);color:var(--ink)}
+.btn.red{background:linear-gradient(90deg,#fb7185,#ef4444)}
+.err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#b91c1c;padding:11px 13px;border-radius:12px;font-size:13px;margin-top:12px}
+.ok{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.35);color:#15803d;padding:11px 13px;border-radius:12px;font-size:13px;margin-bottom:14px}
+/* shell */
 .shell{display:flex;min-height:100vh}
-.side{width:230px;background:#0a1424;border-right:1px solid var(--line);padding:22px 14px;position:sticky;top:0;height:100vh}
-.side .logo{font-weight:800;font-size:19px;padding:0 10px 18px;
-background:linear-gradient(90deg,var(--teal),var(--indigo));-webkit-background-clip:text;background-clip:text;color:transparent}
-.nav a{display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:11px;color:var(--mut);font-size:14px;margin-bottom:3px}
-.nav a.active,.nav a:hover{background:#12213c;color:var(--tx)}
-.main{flex:1;padding:28px 34px;max-width:1100px}
-.h1{font-size:22px;font-weight:800;margin-bottom:4px}
-.h1 .dim{color:var(--mut);font-weight:500;font-size:14px}
-.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:22px}
-.stat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
-.stat .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:1px}
-.stat .v{font-size:26px;font-weight:800;margin-top:6px}
-.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:20px}
-.panel h2{font-size:15px;margin-bottom:14px;color:var(--tx)}
+.side{width:230px;background:var(--panel);border-right:1px solid var(--line);padding:20px 14px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column}
+.side .logo{font-weight:800;font-size:19px;padding:4px 10px 20px;display:flex;align-items:center;gap:9px}
+.side .logo .dot{width:10px;height:10px;border-radius:50%;background:linear-gradient(90deg,var(--teal),var(--sky));box-shadow:0 0 10px var(--teal)}
+.nav a{display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:12px;color:var(--mut);font-size:14px;font-weight:500;margin-bottom:3px;transition:.15s}
+.nav a svg{flex:none}
+.nav a.active{background:linear-gradient(90deg,var(--teal),var(--teal2));color:#fff;box-shadow:0 8px 18px rgba(15,174,150,.3)}
+.nav a:not(.active):hover{background:var(--track);color:var(--ink)}
+.nav .sp{flex:1}
+.main{flex:1;padding:26px 32px;max-width:1180px}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;flex-wrap:wrap;gap:12px}
+.h1{font-size:22px;font-weight:800}.h1 .dim{color:var(--mut);font-weight:500;font-size:14px}
+.themebtn{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);color:var(--mut);
+ padding:9px 14px;border-radius:12px;cursor:pointer;font-size:13px;font-weight:600}
+/* gauges */
+.gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-bottom:18px}
+.gauge{background:var(--panel);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px 16px;text-align:center}
+.ring{position:relative;width:132px;height:132px;margin:0 auto}
+.ring svg{transform:rotate(-90deg)}
+.ring .track{stroke:var(--track)}
+.ring .prog{stroke-linecap:round;transition:stroke-dashoffset 1s cubic-bezier(.4,0,.2,1)}
+.ring .val{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ring .val b{font-size:24px;font-weight:800}
+.ring .val span{font-size:11px;color:var(--mut)}
+.gauge .lbl{margin-top:14px;font-size:13px;color:var(--mut);font-weight:600}
+.gauge .sub{font-size:12px;color:var(--mut);margin-top:3px}
+/* cards */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:820px){.grid2{grid-template-columns:1fr}}
+.card{background:var(--panel);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.card .t{font-size:14px;font-weight:700}
+.tag{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;font-size:12px;font-weight:700;background:var(--track);color:var(--mut)}
+.tag.grn{background:rgba(34,197,94,.14);color:#16a34a}.tag.red{background:rgba(239,68,68,.12);color:#dc2626}
+.tag.teal{background:rgba(15,174,150,.14);color:#0d9488}.tag.sky{background:rgba(58,160,242,.14);color:#2563eb}
+.tags{display:flex;gap:8px;flex-wrap:wrap}
+.panel{background:var(--panel);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:18px}
+.panel h2{font-size:15px;margin-bottom:14px}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}
+th,td{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line)}
 th{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
-.pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}
-.pill.on{background:rgba(52,211,153,.15);color:#6ee7b7}
-.pill.off{background:rgba(148,163,184,.12);color:#94a3b8}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
-.field{flex:1;min-width:140px}
-.field label{margin-top:0}
-.dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:7px}
-.dot.on{background:var(--grn);box-shadow:0 0 8px var(--grn)} .dot.off{background:var(--red)}
+.pill{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12px;font-weight:700}
+.pill.on{background:rgba(34,197,94,.14);color:#16a34a}.pill.off{background:rgba(148,163,184,.16);color:#64748b}
+.row{display:flex;gap:9px;flex-wrap:wrap;align-items:end}
+.field{flex:1;min-width:140px}.field label{display:block;font-size:12px;color:var(--mut);margin-bottom:6px}
+.field input{width:100%;padding:11px 12px;border:1.5px solid var(--line);border-radius:11px;background:var(--panel);color:var(--ink);outline:0}
+.field input:focus{border-color:var(--teal)}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;word-break:break-all}
-@media(max-width:760px){.side{display:none}.main{padding:18px}}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:8px}
+.dot.on{background:var(--grn);box-shadow:0 0 8px var(--grn)}.dot.off{background:var(--red)}
+@media(max-width:760px){.side{display:none}.main{padding:16px}}
 """
 
-def page(body, title="Panel"):
-    return ("<!doctype html><html><head><meta charset=utf-8>"
+ICON = {
+ "grid": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><rect x=3 y=3 width=7 height=7 rx=1.5/><rect x=14 y=3 width=7 height=7 rx=1.5/><rect x=3 y=14 width=7 height=7 rx=1.5/><rect x=14 y=14 width=7 height=7 rx=1.5/></svg>",
+ "users": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx=9 cy=8 r=3.2/><path d='M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5'/><path d='M16 5.5a3 3 0 010 5.6'/><path d='M21 20c0-2.4-1.4-4.2-3.5-5'/></svg>",
+ "bolt": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M13 2 4 14h7l-1 8 9-12h-7z'/></svg>",
+ "cog": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx=12 cy=12 r=3/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2'/></svg>",
+ "globe": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><circle cx=12 cy=12 r=9/><path d='M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18'/></svg>",
+ "shield": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z'/></svg>",
+ "plug": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M9 2v6M15 2v6M6 8h12v3a6 6 0 01-12 0zM12 17v5'/></svg>",
+ "out": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3'/></svg>",
+ "user": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=#7c8aa0 stroke-width=2><circle cx=12 cy=8 r=4/><path d='M4 21c0-4 3.6-7 8-7s8 3 8 7'/></svg>",
+ "lock": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=#7c8aa0 stroke-width=2><rect x=4 y=10 width=16 height=11 rx=2/><path d='M8 10V7a4 4 0 018 0v3'/></svg>",
+ "eye": "<svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z'/><circle cx=12 cy=12 r=3/></svg>",
+}
+
+def page(body, title="Panel", extra_head=""):
+    return ("<!doctype html><html lang=en><head><meta charset=utf-8>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<title>%s · SSH VPN</title><style>%s</style></head><body>%s</body></html>"
-            % (html.escape(title), CSS, body))
+            "<title>%s · SSH VPN</title><style>%s</style>"
+            "<script>(function(){var t=localStorage.getItem('sshvpn-theme')||'light';document.documentElement.setAttribute('data-theme',t);})();</script>"
+            "%s</head><body>%s</body></html>"
+            % (html.escape(title), CSS, extra_head, body))
 
 def login_page(error=""):
     e = "<div class=err>%s</div>" % html.escape(error) if error else ""
-    body = ("<div class=login-wrap><div class='card login'>"
-            "<div class=brand><div class=logo>SSH VPN</div>"
-            "<div class=sub>Control Panel</div></div>"
+    js = ("<script>function tog(){var p=document.getElementById('pw');p.type=p.type=='password'?'text':'password';}</script>")
+    body = ("<div class=login-wrap><div class=login>"
+            "<h1>Welcome</h1><div class=sub>SSH VPN Control Panel</div>"
             "<form method=post action='%s/login'>"
-            "<label>Username</label><input name=user autofocus autocomplete=username>"
-            "<label>Password</label><input name=pw type=password autocomplete=current-password>"
-            "%s<button class=btn>Log In</button></form></div></div>" % (PREFIX, e))
-    return page(body, "Login")
+            "<div class=inp>%s<input name=user placeholder=Username autofocus autocomplete=username></div>"
+            "<div class=inp>%s<input id=pw name=pw type=password placeholder=Password autocomplete=current-password>"
+            "<span class=eye onclick=tog()>%s</span></div>"
+            "%s<button class=btn>Log In</button></form></div></div>"
+            % (PREFIX, ICON["user"], ICON["lock"], ICON["eye"], e))
+    return page(body, "Login", js)
 
-NAV = [("", "Dashboard"), ("users", "Users"), ("online", "Online"),
-       ("services", "Services"), ("xray", "Xray / V2Ray"),
-       ("abuse", "Abuse Protection"), ("ports", "Ports")]
+NAV = [("", "Overview", "grid"), ("users", "Users", "users"), ("online", "Online", "bolt"),
+       ("services", "Services", "cog"), ("xray", "Xray / V2Ray", "globe"),
+       ("abuse", "Abuse Protection", "shield"), ("ports", "Ports", "plug")]
 
-def shell(active, inner, title="Dashboard"):
+THEME_BTN = ("<button class=themebtn onclick=\"var d=document.documentElement,n=d.getAttribute('data-theme')=='dark'?'light':'dark';"
+             "d.setAttribute('data-theme',n);localStorage.setItem('sshvpn-theme',n);this.querySelector('span').textContent=n=='dark'?'Light mode':'Dark mode';\">"
+             "🌓 <span>Dark mode</span></button>")
+
+def shell(active, inner, title="Overview", extra_head=""):
     nav = ""
-    for slug, label in NAV:
+    for slug, label, ic in NAV:
         cls = "active" if slug == active else ""
-        nav += "<a class='%s' href='%s/%s'>%s</a>" % (cls, PREFIX, slug, label)
-    body = ("<div class=shell><div class=side><div class=logo>SSH VPN</div>"
-            "<div class=nav>%s<a href='%s/logout' style='margin-top:18px;color:var(--red)'>Log out</a></div></div>"
-            "<div class=main>%s</div></div>" % (nav, PREFIX, inner))
-    return page(body, title)
+        nav += "<a class='%s' href='%s/%s'>%s%s</a>" % (cls, PREFIX, slug, ICON[ic], label)
+    body = ("<div class=shell><div class=side>"
+            "<div class=logo><span class=dot></span>SSH VPN</div>"
+            "<div class=nav>%s<div class=sp></div>"
+            "<a href='%s/logout' style='color:var(--red)'>%sLog Out</a></div></div>"
+            "<div class=main>%s</div></div>" % (nav, PREFIX, ICON["out"], inner))
+    return page(body, title, extra_head)
 
 def flash(msg, kind="ok"):
-    if not msg:
-        return ""
-    return "<div class=%s>%s</div>" % (kind, html.escape(msg))
+    return "<div class=%s>%s</div>" % (kind, html.escape(msg)) if msg else ""
 
-# ---------- views ----------
+def gauge(gid, label):
+    # circumference for r=54 => 339.29
+    return ("<div class=gauge><div class=ring>"
+            "<svg width=132 height=132>"
+            "<circle class=track cx=66 cy=66 r=54 fill=none stroke-width=12></circle>"
+            "<circle id='%s-arc' class=prog cx=66 cy=66 r=54 fill=none stroke-width=12 "
+            "stroke='url(#g-%s)' stroke-dasharray=339.29 stroke-dashoffset=339.29></circle>"
+            "<defs><linearGradient id='g-%s' x1=0 y1=0 x2=1 y2=1>"
+            "<stop offset=0 stop-color=#0fae96/><stop offset=1 stop-color=#3aa0f2/></linearGradient></defs>"
+            "</svg><div class=val><b id='%s-pct'>0%%</b><span id='%s-sub'></span></div></div>"
+            "<div class=lbl>%s</div></div>"
+            % (gid, gid, gid, gid, gid, label))
+
+DASH_JS = r"""
+<script>
+var C=339.29, P='%PREFIX%';
+function setg(id,pct,sub){
+ var a=document.getElementById(id+'-arc');
+ if(a){a.style.strokeDashoffset=(C*(1-Math.min(100,pct)/100)).toFixed(2);}
+ document.getElementById(id+'-pct').textContent=pct.toFixed(pct<10?1:0)+'%';
+ if(sub!==undefined)document.getElementById(id+'-sub').textContent=sub;
+}
+function hb(n){n=n||0;var u=['B','KB','MB','GB','TB'];var i=0;while(n>=1024&&i<4){n/=1024;i++;}return n.toFixed(i?2:0)+' '+u[i];}
+function T(id,txt){var e=document.getElementById(id);if(e)e.textContent=txt;}
+function tag(on){return on?'<span class="tag grn">● running</span>':'<span class="tag red">○ stopped</span>';}
+function poll(){
+ fetch(P+'/api/stats',{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
+  setg('cpu',s.cpu, s.cores+' cores');
+  setg('mem',s.mem_pct, hb(s.mem_used)+' / '+hb(s.mem_total));
+  setg('swap',s.swap_pct, hb(s.swap_used)+' / '+hb(s.swap_total));
+  setg('disk',s.disk_pct, hb(s.disk_used)+' / '+hb(s.disk_total));
+  T('c-up',hb(s.up)+'/s'); T('c-down',hb(s.down)+'/s');
+  T('c-out',hb(s.net_out)); T('c-in',hb(s.net_in));
+  T('c-tcp',s.tcp); T('c-udp',s.udp);
+  T('c-uptime',s.uptime); T('c-load',s.load);
+  T('c-users',s.users_total); T('c-online',s.users_online);
+  var xe=document.getElementById('c-xray'); if(xe)xe.innerHTML=s.xray?'<span class="tag grn">● running</span>':(s.xray_installed?'<span class="tag red">○ stopped</span>':'<span class="tag">not installed</span>');
+ }).catch(function(){});
+}
+poll(); setInterval(poll,2000);
+</script>
+""".replace("%PREFIX%", PREFIX)
+
 def view_dashboard(msg=""):
-    users = list_users()
-    total = len(users)
-    online = sum(1 for u in users if u["online"])
-    _, _, tot = bw_scope("all")
-    svc_html = ""
-    for s in SERVICES:
-        on = svc_active(s)
-        svc_html += "<div style='margin:6px 0'><span class='dot %s'></span>%s</div>" % ("on" if on else "off", s)
-    inner = ("<div class=top><div><div class=h1>Dashboard <span class=dim>· %s</span></div></div></div>"
-             "%s"
-             "<div class=grid>"
-             "<div class=stat><div class=k>Accounts</div><div class=v>%d</div></div>"
-             "<div class=stat><div class=k>Online now</div><div class=v style='color:var(--grn)'>%d</div></div>"
-             "<div class=stat><div class=k>Bandwidth used</div><div class=v>%s</div></div>"
-             "</div>"
-             "<div class=panel><h2>Services</h2>%s</div>"
-             % (html.escape(HOST_DISPLAY), flash(msg), total, online, hb(tot), svc_html))
-    return shell("", inner, "Dashboard")
+    gs = gauge("cpu", "CPU") + gauge("mem", "Memory") + gauge("swap", "Swap") + gauge("disk", "Disk")
+    cards = (
+        "<div class=grid2>"
+        "<div class=card><div class=t>Accounts</div><div class=tags><span class='tag teal'>Total: <b id=c-users>0</b></span><span class='tag grn'>Online: <b id=c-online>0</b></span></div></div>"
+        "<div class=card><div class=t>Uptime</div><div class=tags><span class='tag sky' id=c-uptime>-</span></div></div>"
+        "<div class=card><div class=t>Xray</div><div class=tags><span id=c-xray>-</span></div></div>"
+        "<div class=card><div class=t>System Load</div><div class=tags><span class=tag id=c-load>0</span></div></div>"
+        "<div class=card><div class=t>Connections</div><div class=tags><span class=tag>TCP: <b id=c-tcp>0</b></span><span class=tag>UDP: <b id=c-udp>0</b></span></div></div>"
+        "<div class=card><div class=t>Speed</div><div class=tags><span class='tag sky'>↑ <b id=c-up>0</b></span><span class='tag teal'>↓ <b id=c-down>0</b></span></div></div>"
+        "<div class=card><div class=t>Total Transfer</div><div class=tags><span class=tag>Out: <b id=c-out>0</b></span><span class=tag>In: <b id=c-in>0</b></span></div></div>"
+        "<div class=card><div class=t>Host</div><div class=tags><span class='tag teal'>%s</span></div></div>"
+        "</div>" % html.escape(HOST_DISPLAY))
+    inner = ("<div class=top><div class=h1>Overview <span class=dim>· %s</span></div>%s</div>"
+             "%s<div class=gauges>%s</div>%s" % (html.escape(HOST_DISPLAY), THEME_BTN, flash(msg), gs, cards))
+    return shell("", inner, "Overview", DASH_JS)
 
 def view_users(msg="", err=""):
-    users = list_users()
     rows = ""
-    for u in users:
+    for u in list_users():
         pill = "<span class='pill on'>online</span>" if u["online"] else "<span class='pill off'>offline</span>"
-        rows += ("<tr><td class=mono>%s</td><td>%s</td><td>%s</td>"
-                 "<td class=row style='border:0'>"
-                 "<form method=post action='%s/users/renew' style='display:inline'>"
-                 "<input type=hidden name=user value='%s'>"
-                 "<input name=days placeholder=+days style='width:80px;padding:6px 8px' >"
-                 "<button class='btn sm ghost'>Renew</button></form> "
-                 "<form method=post action='%s/users/passwd' style='display:inline'>"
-                 "<input type=hidden name=user value='%s'>"
-                 "<input name=pw placeholder='new pass' style='width:110px;padding:6px 8px'>"
-                 "<button class='btn sm ghost'>Set</button></form> "
+        rows += ("<tr><td class=mono>%s</td><td>%s</td><td>%s</td><td><div class=row style='border:0'>"
+                 "<form method=post action='%s/users/renew' style='display:inline'><input type=hidden name=user value='%s'>"
+                 "<input name=days placeholder=+days style='width:74px;padding:6px 8px'><button class='btn sm ghost'>Renew</button></form> "
+                 "<form method=post action='%s/users/passwd' style='display:inline'><input type=hidden name=user value='%s'>"
+                 "<input name=pw placeholder='new pass' style='width:104px;padding:6px 8px'><button class='btn sm ghost'>Set</button></form> "
                  "<form method=post action='%s/users/delete' style='display:inline' onsubmit=\"return confirm('Delete %s?')\">"
-                 "<input type=hidden name=user value='%s'>"
-                 "<button class='btn sm red'>Delete</button></form>"
-                 "</td></tr>"
-                 % (html.escape(u["name"]), html.escape(u["exp"]), pill,
-                    PREFIX, html.escape(u["name"]), PREFIX, html.escape(u["name"]),
-                    PREFIX, html.escape(u["name"]), html.escape(u["name"])))
+                 "<input type=hidden name=user value='%s'><button class='btn sm red'>Delete</button></form></div></td></tr>"
+                 % (html.escape(u["name"]), html.escape(u["exp"]), pill, PREFIX, html.escape(u["name"]),
+                    PREFIX, html.escape(u["name"]), PREFIX, html.escape(u["name"]), html.escape(u["name"])))
     if not rows:
         rows = "<tr><td colspan=4 style='color:var(--mut)'>No users yet.</td></tr>"
-    inner = ("<div class=top><div class=h1>Users</div></div>"
-             "%s%s"
-             "<div class=panel><h2>Create account</h2>"
-             "<form method=post action='%s/users/create' class=row>"
+    inner = ("<div class=top><div class=h1>Users</div>%s</div>%s%s"
+             "<div class=panel><h2>Create account</h2><form method=post action='%s/users/create' class=row>"
              "<div class=field><label>Username</label><input name=user required></div>"
              "<div class=field><label>Password</label><input name=pw required></div>"
              "<div class=field><label>Days valid</label><input name=days value=30></div>"
              "<button class=btn style='max-width:150px'>Create</button></form></div>"
              "<div class=panel><h2>Accounts</h2><table><tr><th>Username</th><th>Expires</th><th>Status</th><th>Actions</th></tr>%s</table></div>"
-             % (flash(msg), flash(err, "err"), PREFIX, rows))
+             % (THEME_BTN, flash(msg), flash(err, "err"), PREFIX, rows))
     return shell("users", inner, "Users")
 
 def view_online():
@@ -3401,84 +3545,71 @@ def view_online():
     rows = "".join("<tr><td class=mono>%s</td><td>%d</td></tr>" % (html.escape(u["name"]), u["sessions"]) for u in users)
     if not rows:
         rows = "<tr><td colspan=2 style='color:var(--mut)'>Nobody connected right now.</td></tr>"
-    inner = ("<div class=top><div class=h1>Online Users</div></div>"
-             "<div class=panel><table><tr><th>Username</th><th>Sessions</th></tr>%s</table></div>" % rows)
+    inner = ("<div class=top><div class=h1>Online Users</div>%s</div>"
+             "<div class=panel><table><tr><th>Username</th><th>Sessions</th></tr>%s</table></div>" % (THEME_BTN, rows))
     return shell("online", inner, "Online")
 
 def view_services(msg=""):
     rows = ""
     for s in SERVICES:
-        on = svc_active(s)
-        pill = "<span class='pill on'>running</span>" if on else "<span class='pill off'>stopped</span>"
+        pill = "<span class='pill on'>running</span>" if svc_active(s) else "<span class='pill off'>stopped</span>"
         rows += "<tr><td>%s</td><td>%s</td></tr>" % (s, pill)
-    inner = ("<div class=top><div class=h1>Services</div>"
-             "<form method=post action='%s/services/restart'><button class='btn sm'>Restart all</button></form></div>"
+    inner = ("<div class=top><div class=h1>Services</div><div class=row>%s"
+             "<form method=post action='%s/services/restart'><button class='btn sm'>Restart all</button></form></div></div>"
              "%s<div class=panel><table><tr><th>Service</th><th>Status</th></tr>%s</table></div>"
-             % (PREFIX, flash(msg), rows))
+             % (THEME_BTN, PREFIX, flash(msg), rows))
     return shell("services", inner, "Services")
 
 def view_xray():
     installed = os.path.exists("/usr/local/bin/xray")
     active = svc_active("xray")
-    accts = 0
-    try:
-        accts = sum(1 for l in read_file(XACC).splitlines() if "|" in l)
-    except Exception:
-        pass
+    accts = sum(1 for l in read_file(XACC).splitlines() if "|" in l)
     st = ("<span class='pill on'>active</span>" if active else
           ("<span class='pill off'>installed (stopped)</span>" if installed else "<span class='pill off'>not installed</span>"))
-    ctrl = ""
-    if installed:
-        ctrl = ("<form method=post action='%s/xray/start' style='display:inline'><button class='btn sm'>Start</button></form> "
-                "<form method=post action='%s/xray/stop' style='display:inline'><button class='btn sm ghost'>Stop</button></form>"
-                % (PREFIX, PREFIX))
-    inner = ("<div class=top><div class=h1>Xray / V2Ray</div>%s</div>"
-             "<div class=panel><table>"
-             "<tr><th>Status</th><td>%s</td></tr>"
-             "<tr><th>Host</th><td class=mono>%s</td></tr>"
-             "<tr><th>Accounts</th><td>%d</td></tr>"
-             "</table><p style='color:var(--mut);margin-top:12px;font-size:13px'>"
-             "Create/manage individual VMess/VLESS/Trojan accounts from the terminal menu (option 9).</p></div>"
-             % (ctrl, st, html.escape(HOST_DISPLAY), accts))
+    ctrl = ("<form method=post action='%s/xray/start' style='display:inline'><button class='btn sm'>Start</button></form> "
+            "<form method=post action='%s/xray/stop' style='display:inline'><button class='btn sm ghost'>Stop</button></form>"
+            % (PREFIX, PREFIX)) if installed else ""
+    inner = ("<div class=top><div class=h1>Xray / V2Ray</div><div class=row>%s%s</div></div>"
+             "<div class=panel><table><tr><th>Status</th><td>%s</td></tr>"
+             "<tr><th>Host</th><td class=mono>%s</td></tr><tr><th>Accounts</th><td>%d</td></tr></table>"
+             "<p style='color:var(--mut);margin-top:12px;font-size:13px'>Create individual VMess/VLESS/Trojan accounts from the terminal menu (option 9).</p></div>"
+             % (THEME_BTN, ctrl, st, html.escape(HOST_DISPLAY), accts))
     return shell("xray", inner, "Xray")
 
 def view_abuse(msg=""):
     status = sh(["/usr/local/bin/abuse-guard", "status"]).stdout or "abuse-guard not installed."
-    inner = ("<div class=top><div class=h1>Abuse Protection</div>"
-             "<div class=row>"
+    inner = ("<div class=top><div class=h1>Abuse Protection</div><div class=row>%s"
              "<form method=post action='%s/abuse/enable' style='display:inline'><button class='btn sm'>Enable</button></form>"
              "<form method=post action='%s/abuse/disable' style='display:inline'><button class='btn sm red'>Disable</button></form>"
-             "<form method=post action='%s/abuse/refresh' style='display:inline'><button class='btn sm ghost'>Refresh list</button></form>"
-             "<form method=post action='%s/abuse/test' style='display:inline'><button class='btn sm ghost'>Test</button></form>"
-             "</div></div>%s"
+             "<form method=post action='%s/abuse/refresh' style='display:inline'><button class='btn sm ghost'>Refresh</button></form>"
+             "<form method=post action='%s/abuse/test' style='display:inline'><button class='btn sm ghost'>Test</button></form></div></div>%s"
              "<div class=panel><h2>Status</h2><pre class=mono style='white-space:pre-wrap;color:var(--mut)'>%s</pre></div>"
-             % (PREFIX, PREFIX, PREFIX, PREFIX, flash(msg), html.escape(status)))
+             % (THEME_BTN, PREFIX, PREFIX, PREFIX, PREFIX, flash(msg), html.escape(status)))
     return shell("abuse", inner, "Abuse Protection")
 
 def view_ports():
-    ports = [("WebSocket (payload)", "80"), ("SSL + payload (TLS)", "443"),
-             ("SSL direct SSH", "447"), ("OpenSSH", "22"), ("Dropbear", "109 / 143")]
+    ports = [("WebSocket (payload)", "80"), ("SSL + payload (TLS)", "443"), ("SSL direct SSH", "447"),
+             ("OpenSSH", "22"), ("Dropbear", "109 / 143")]
     rows = "".join("<tr><td>%s</td><td class=mono>%s:%s</td></tr>" % (n, html.escape(HOST_DISPLAY), p) for n, p in ports)
-    inner = ("<div class=top><div class=h1>Connection Ports</div></div>"
-             "<div class=panel><table><tr><th>Service</th><th>Address</th></tr>%s</table></div>" % rows)
+    inner = ("<div class=top><div class=h1>Connection Ports</div>%s</div>"
+             "<div class=panel><table><tr><th>Service</th><th>Address</th></tr>%s</table></div>" % (THEME_BTN, rows))
     return shell("ports", inner, "Ports")
 
-# ---------- HTTP handler ----------
+# ---------- HTTP ----------
 class H(BaseHTTPRequestHandler):
     server_version = "sshvpn"
     def log_message(self, *a):
         pass
 
-    def _cookie_token(self):
-        c = self.headers.get("Cookie", "")
-        for part in c.split(";"):
+    def _tok(self):
+        for part in self.headers.get("Cookie", "").split(";"):
             part = part.strip()
             if part.startswith("sess="):
                 return part[5:]
         return ""
 
     def authed(self):
-        return check_token(self._cookie_token())
+        return check_token(self._tok())
 
     def _send(self, code, body, ctype="text/html; charset=utf-8", cookie=None, redirect=None):
         data = body.encode() if isinstance(body, str) else body
@@ -3504,53 +3635,43 @@ class H(BaseHTTPRequestHandler):
     def _redirect(self, to):
         self._send(303, "", redirect=PREFIX + to)
 
+    def _prefix_ok(self):
+        return (not PREFIX) or urlparse(self.path).path.startswith(PREFIX)
+
     def do_GET(self):
+        if not self._prefix_ok():
+            self._send(404, page("<div class=login-wrap><div class=login>Not found</div></div>", "404"))
+            return
         p = self._path()
-        # everything requires the secret prefix
-        if PREFIX and not urlparse(self.path).path.startswith(PREFIX):
-            self._send(404, page("<div class=login-wrap><div class='card login'>Not found</div></div>", "404"))
-            return
         if p == "/login":
-            self._send(200, login_page())
-            return
+            self._send(200, login_page()); return
         if p == "/logout":
-            self._send(303, "", cookie="sess=; Path=/; Max-Age=0", redirect=PREFIX + "/login")
-            return
+            self._send(303, "", cookie="sess=; Path=/; Max-Age=0", redirect=PREFIX + "/login"); return
         if not self.authed():
-            self._redirect("/login")
-            return
+            self._redirect("/login"); return
+        if p == "/api/stats":
+            self._send(200, json.dumps(collect_stats()), "application/json"); return
         q = parse_qs(urlparse(self.path).query)
-        m = q.get("m", [""])[0]
-        e = q.get("e", [""])[0]
-        if p == "/" or p == "":
-            self._send(200, view_dashboard(m))
-        elif p == "/users":
-            self._send(200, view_users(m, e))
-        elif p == "/online":
-            self._send(200, view_online())
-        elif p == "/services":
-            self._send(200, view_services(m))
-        elif p == "/xray":
-            self._send(200, view_xray())
-        elif p == "/abuse":
-            self._send(200, view_abuse(m))
-        elif p == "/ports":
-            self._send(200, view_ports())
+        m = q.get("m", [""])[0]; e = q.get("e", [""])[0]
+        views = {"/": lambda: view_dashboard(m), "": lambda: view_dashboard(m),
+                 "/users": lambda: view_users(m, e), "/online": view_online,
+                 "/services": lambda: view_services(m), "/xray": view_xray,
+                 "/abuse": lambda: view_abuse(m), "/ports": view_ports}
+        fn = views.get(p)
+        if fn:
+            self._send(200, fn())
         else:
             self._redirect("/")
 
     def _form(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
-        d = parse_qs(raw)
-        return {k: v[0] for k, v in d.items()}
+        return {k: v[0] for k, v in parse_qs(raw).items()}
 
     def do_POST(self):
-        p = self._path()
-        if PREFIX and not urlparse(self.path).path.startswith(PREFIX):
-            self._send(404, "not found", "text/plain")
-            return
-        f = self._form()
+        if not self._prefix_ok():
+            self._send(404, "not found", "text/plain"); return
+        p = self._path(); f = self._form()
         if p == "/login":
             if check_login(f.get("user", ""), f.get("pw", "")):
                 self._send(303, "", cookie="sess=%s; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=%d" % (make_token(), 8 * 3600),
@@ -3559,27 +3680,22 @@ class H(BaseHTTPRequestHandler):
                 self._send(200, login_page("Invalid username or password."))
             return
         if not self.authed():
-            self._redirect("/login")
-            return
+            self._redirect("/login"); return
         try:
-            self.handle_action(p, f)
+            self.action(p, f)
         except Exception as ex:
             self._redirect("/?m=" + _q("Error: %s" % ex))
 
-    def handle_action(self, p, f):
+    def action(self, p, f):
         if p == "/users/create":
             u = f.get("user", "").strip(); pw = f.get("pw", ""); days = f.get("days", "30")
-            if not valid_name(u):
-                return self._redirect("/users?e=" + _q("Invalid username."))
-            if not pw:
-                return self._redirect("/users?e=" + _q("Password required."))
-            if sh(["id", u]).returncode == 0:
-                return self._redirect("/users?e=" + _q("User already exists."))
+            if not valid_name(u): return self._redirect("/users?e=" + _q("Invalid username."))
+            if not pw: return self._redirect("/users?e=" + _q("Password required."))
+            if sh(["id", u]).returncode == 0: return self._redirect("/users?e=" + _q("User already exists."))
             days = days if days.isdigit() else "30"
             exp = sh(["date", "-d", "+%s days" % days, "+%Y-%m-%d"]).stdout.strip()
             sh(["useradd", "-e", exp, "-M", "-s", "/bin/false", u])
-            subprocess.run(["passwd", u], input="%s\n%s\n" % (pw, pw), text=True,
-                           capture_output=True)
+            subprocess.run(["passwd", u], input="%s\n%s\n" % (pw, pw), text=True, capture_output=True)
             return self._redirect("/users?m=" + _q("Created %s (expires %s)." % (u, exp)))
         if p == "/users/delete":
             u = f.get("user", "")
@@ -3588,8 +3704,7 @@ class H(BaseHTTPRequestHandler):
                 return self._redirect("/users?m=" + _q("Deleted %s." % u))
             return self._redirect("/users?e=" + _q("User not found."))
         if p == "/users/renew":
-            u = f.get("user", ""); days = f.get("days", "30")
-            days = days if days.isdigit() else "30"
+            u = f.get("user", ""); days = f.get("days", "30"); days = days if days.isdigit() else "30"
             if valid_name(u) and sh(["id", u]).returncode == 0:
                 exp = sh(["date", "-d", "+%s days" % days, "+%Y-%m-%d"]).stdout.strip()
                 sh(["chage", "-E", exp, u])
@@ -3606,42 +3721,24 @@ class H(BaseHTTPRequestHandler):
                 sh(["systemctl", "restart", s])
             return self._redirect("/services?m=" + _q("Services restarted."))
         if p == "/xray/start":
-            sh(["systemctl", "enable", "xray"]); sh(["systemctl", "start", "xray"])
-            return self._redirect("/xray")
+            sh(["systemctl", "enable", "xray"]); sh(["systemctl", "start", "xray"]); return self._redirect("/xray")
         if p == "/xray/stop":
-            sh(["systemctl", "stop", "xray"])
-            return self._redirect("/xray")
+            sh(["systemctl", "stop", "xray"]); return self._redirect("/xray")
         if p in ("/abuse/enable", "/abuse/disable", "/abuse/refresh", "/abuse/test"):
             action = p.split("/")[-1]
             r = sh(["/usr/local/bin/abuse-guard", action])
-            return self._redirect("/abuse?m=" + _q(("abuse-guard %s done. " % action) + (r.stdout[-300:] if r.stdout else "")))
+            return self._redirect("/abuse?m=" + _q(("abuse-guard %s done. " % action) + (r.stdout[-240:] if r.stdout else "")))
         return self._redirect("/")
-
-from urllib.parse import quote as _q
 
 def main():
     if not PASS_HASH:
-        sys.stderr.write("web panel not configured (no PASS_HASH); run 'Activate website' from the menu.\n")
-        sys.exit(1)
+        sys.stderr.write("web panel not configured; run 'Activate website' from the menu.\n"); sys.exit(1)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    pem = STUNNEL_PEM if os.path.exists(STUNNEL_PEM) else None
-    if not pem:
-        # self-signed fallback
-        pem = "/etc/ssh-panel/web.pem"
-        if not os.path.exists(pem):
-            sh(["openssl", "req", "-new", "-newkey", "rsa:2048", "-days", "3650", "-nodes",
-                "-x509", "-subj", "/CN=%s" % HOST_DISPLAY, "-out", pem, "-keyout", pem + ".key"])
-            try:
-                with open(pem, "a") as out, open(pem + ".key") as k:
-                    out.write(k.read())
-                os.remove(pem + ".key")
-            except Exception:
-                pass
+    pem = WEB_CERT if os.path.exists(WEB_CERT) else "/etc/stunnel/stunnel.pem"
     try:
         ctx.load_cert_chain(certfile=pem)
     except Exception as e:
-        sys.stderr.write("TLS cert load failed: %s\n" % e)
-        sys.exit(1)
+        sys.stderr.write("TLS cert load failed (%s): %s\n" % (pem, e)); sys.exit(1)
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), H)
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     sys.stderr.write("SSH VPN web panel on :%d%s\n" % (PORT, PREFIX))
