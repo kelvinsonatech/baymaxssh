@@ -252,6 +252,13 @@ phase "WebSocket proxy"
 # Remove any leftover Python proxy from a previous install.
 rm -f /usr/local/bin/ws-proxy.py 2>/dev/null || true
 
+# --- Ensure a Go compiler is available -----------------------------------
+if ! command -v go >/dev/null 2>&1; then
+    info "Installing Go toolchain..."
+    eval "$APT golang-go" </dev/null >/dev/null 2>&1 || true
+fi
+GO_BIN="$(command -v go || true)"
+
 BUILD_DIR=/tmp/ws-proxy-build
 rm -rf "$BUILD_DIR"; mkdir -p "$BUILD_DIR"
 
@@ -400,26 +407,6 @@ func main() {
 }
 GOEOF
 
-# --- Skip the whole toolchain + rebuild when nothing changed --------------
-# Installing golang-go (~hundreds of MB) and recompiling on every run made
-# this phase by far the slowest part of the installer. The proxy source is
-# embedded above, so if the installed binary was built from the exact same
-# source (hash stamp), reuse it instantly.
-WS_STAMP=/usr/local/bin/.ws-proxy.src.md5
-SRC_MD5=$(md5sum "$BUILD_DIR/main.go" 2>/dev/null | awk '{print $1}')
-if [ -x /usr/local/bin/ws-proxy ] && [ -n "$SRC_MD5" ] \
-   && [ "$(cat "$WS_STAMP" 2>/dev/null)" = "$SRC_MD5" ]; then
-    PROXY_EXEC=/usr/local/bin/ws-proxy
-    success "Go proxy already up to date (port 80) — build skipped"
-else
-
-# --- Ensure a Go compiler is available -----------------------------------
-if ! command -v go >/dev/null 2>&1; then
-    info "Installing Go toolchain..."
-    eval "$APT golang-go" </dev/null >/dev/null 2>&1 || true
-fi
-GO_BIN="$(command -v go || true)"
-
 BUILT=0
 if [ -n "$GO_BIN" ]; then
     ( cd "$BUILD_DIR" && \
@@ -430,7 +417,6 @@ fi
 
 if [ "$BUILT" -eq 1 ]; then
     PROXY_EXEC=/usr/local/bin/ws-proxy
-    echo "$SRC_MD5" > "$WS_STAMP"
     success "Compiled Go proxy installed (port 80)"
 else
     # ---- Fallback: Python proxy (if Go could not be installed/built) ----
@@ -528,8 +514,6 @@ PYEOF
     chmod +x /usr/local/bin/ws-proxy.py
     PROXY_EXEC="/usr/bin/python3 /usr/local/bin/ws-proxy.py"
 fi
-
-fi  # end skip-rebuild (stamp matched)
 
 cat > /etc/systemd/system/ws-proxy.service <<EOF
 [Unit]
@@ -726,11 +710,9 @@ remove_fw() { _fw_remove iptables; _fw_remove ip6tables; }
 # "talks to 8.8.8.8" but gets filtered answers — and (b) block the known
 # encrypted-DNS side doors. NAT only sees the first packet of a connection
 # and the filter chain RETURNs on ESTABLISHED first, so speed is untouched.
-# Well-known DoH/DoT resolver IPs. NOTE: these anycast addresses also serve
-# non-DNS traffic and are commonly used as VPN bug-hosts/proxy SNI targets,
-# so port-443 traffic to them must NEVER be blocked (it would clip the
-# tunnel's own path). They are kept only for reference/documentation; the
-# enforced side-door blocks are protocol-wide DoT(853) only.
+# Well-known DoH/DoT resolver IPs (these addresses serve DNS only, so blocking
+# 443/853 to them breaks nothing legitimate). Covers Cloudflare, Google, Quad9,
+# AdGuard, OpenDNS/Cisco, NextDNS anycast, ControlD, Mullvad, CleanBrowsing.
 DOH_IPS="1.1.1.1 1.0.0.1 1.1.1.2 1.1.1.3 8.8.8.8 8.8.4.4 9.9.9.9 9.9.9.11 149.112.112.112 149.112.112.11 94.140.14.14 94.140.15.15 94.140.14.15 208.67.222.222 208.67.220.220 208.67.222.123 45.90.28.0 45.90.30.0 76.76.2.0 76.76.10.0 194.242.2.2 185.228.168.9 185.228.169.9 76.76.19.19 76.223.122.150 130.59.31.248 216.239.32.10 216.239.34.10"
 DNSMASQ_UID() { id -u dnsmasq 2>/dev/null || id -u dnsmasq-nm 2>/dev/null; }
 apply_dnsforce() {
@@ -758,17 +740,16 @@ apply_dnsforce() {
     iptables -t nat -A ABUSE_DNSP -p tcp --dport 53 -j REDIRECT --to-ports 53
     iptables -t nat -C PREROUTING -j ABUSE_DNSP 2>/dev/null || iptables -t nat -I PREROUTING -j ABUSE_DNSP
 
-    # --- Encrypted-DNS side door: DoT(853) only ---
-    # We deliberately do NOT touch port 443 (tcp OR udp) to resolver IPs.
-    # HTTP Custom / injector VPN configs very often use 1.1.1.1, 8.8.8.8 etc.
-    # as the bug-host/proxy SNI on 443, and QUIC-based transports ride udp/443
-    # — blocking either "caps" the user's own tunnel. The primary enforcement
-    # is the port-53 redirect; 443 DoH is a residual bypass we accept to
-    # guarantee the VPN is never broken.
+    # --- Encrypted-DNS side doors: DoT(853), DoH(443 to resolver IPs), QUIC ---
     iptables -N ABUSE_DOH 2>/dev/null; iptables -F ABUSE_DOH
     iptables -A ABUSE_DOH -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
     iptables -A ABUSE_DOH -p tcp --dport 853 -j REJECT --reject-with tcp-reset
     iptables -A ABUSE_DOH -p udp --dport 853 -j DROP
+    local ip
+    for ip in $DOH_IPS; do
+        iptables -A ABUSE_DOH -d "$ip" -p tcp --dport 443 -j REJECT --reject-with tcp-reset
+        iptables -A ABUSE_DOH -d "$ip" -p udp --dport 443 -j DROP
+    done
     iptables -C OUTPUT -j ABUSE_DOH 2>/dev/null || iptables -I OUTPUT -j ABUSE_DOH
     iptables -C FORWARD -j ABUSE_DOH 2>/dev/null || iptables -I FORWARD -j ABUSE_DOH
 
@@ -887,34 +868,16 @@ https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
 https://raw.githubusercontent.com/blocklistproject/Lists/master/phishing.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
 "
-    # Fast path: if a non-trivial list was built in the last 24h, reuse it —
-    # re-enabling protection shouldn't re-download megabytes of feeds.
-    if [ "$1" != force ] && [ -s "$BLOCK_HOSTS" ] \
-       && [ $(( $(date +%s) - $(stat -c %Y "$BLOCK_HOSTS" 2>/dev/null || echo 0) )) -lt 86400 ] \
-       && [ "$(grep -c . "$BLOCK_HOSTS")" -ge 10000 ]; then
-        echo "  blocklist: reusing today's list ($(grep -c . "$BLOCK_HOSTS") domains) — use 'Refresh blocklist' to force an update"
-        return 0
-    fi
-    # Download all feeds IN PARALLEL — serial fetches made enabling painfully
-    # slow. Each feed gets its own file; order is preserved when merging so
-    # the RAM cap still trims the tail feeds first.
-    local tmp dldir u i=0 ok=0
-    tmp=$(mktemp); dldir=$(mktemp -d)
+    local tmp raw u ok=0
+    tmp=$(mktemp); raw=$(mktemp)
     for u in $urls; do
-        i=$((i+1))
-        curl -fsSL --max-time 90 "$u" -o "$dldir/$i" 2>/dev/null &
-    done
-    wait
-    i=0
-    for u in $urls; do
-        i=$((i+1))
-        if [ -s "$dldir/$i" ]; then
-            cat "$dldir/$i" >> "$tmp"; echo >> "$tmp"; ok=1
+        if curl -fsSL --max-time 180 "$u" -o "$raw" 2>/dev/null && [ -s "$raw" ]; then
+            cat "$raw" >> "$tmp"; echo >> "$tmp"; ok=1
         else
             echo "  blocklist: could not fetch $u (skipped)"
         fi
     done
-    rm -rf "$dldir"
+    rm -f "$raw"
     if [ "$ok" = 1 ]; then
         # Accept "0.0.0.0 dom" / "127.0.0.1 dom" / bare-domain lines; drop
         # comments and junk; lowercase; dedupe IN FEED ORDER (feeds above are
@@ -948,20 +911,6 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
             rm -f "${BLOCK_HOSTS}.new"
         fi
     fi
-    # Never block the VPN's own infrastructure: the server's configured
-    # domain, the SlowDNS NS domain, and any hosts the admin whitelists in
-    # /etc/ssh-panel/allow.list (one domain per line — bug hosts, CDN/proxy
-    # hosts used by client configs like HTTP Custom). Aggregated feeds
-    # occasionally contain CDN entries; stripping these here guarantees the
-    # filter can never cut the tunnel's own path.
-    local wl; wl=$(mktemp)
-    { cat /etc/ssh-panel/domain.conf /etc/ssh-panel/nsdomain.conf /etc/ssh-panel/allow.list 2>/dev/null; } \
-        | tr 'A-Z' 'a-z' | grep -E '^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$' | sort -u > "$wl"
-    if [ -s "$wl" ] && [ -s "$BLOCK_HOSTS" ]; then
-        awk 'NR==FNR { wl[$1]=1; next } !($2 in wl)' "$wl" "$BLOCK_HOSTS" > "${BLOCK_HOSTS}.wl" \
-            && mv -f "${BLOCK_HOSTS}.wl" "$BLOCK_HOSTS"
-    fi
-    rm -f "$wl"
     [ -s "$BLOCK_HOSTS" ] || : > "$BLOCK_HOSTS"
     rm -f "$tmp"
 }
@@ -1180,7 +1129,7 @@ case "$1" in
         rm -f "$FLAG"; systemctl disable abuse-guard.service >/dev/null 2>&1
         echo "Abuse protection disabled — all rules removed, services restored." ;;
     refresh)
-        fetch_blocklist force; systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
+        fetch_blocklist; systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
         if [ -f /etc/dnsmasq.d/abuse-guard.conf ] && ! systemctl is-active --quiet dnsmasq; then
             echo "dnsmasq failed to load the new list — filter disabled (fail-open)."
             teardown_dns
