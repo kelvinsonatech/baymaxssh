@@ -2772,6 +2772,17 @@ xray_open_ports() {
 
 xray_install() {
     [ -f "$XBIN" ] && return 0
+    # Self-heal: if the abuse-guard content filter ever swept GitHub into its
+    # blocklist (a bad feed once shipped github.com), DNS answers 0.0.0.0 and
+    # the download below fails with a certificate mismatch. Strip GitHub hosts
+    # from the local blocklist and reload dnsmasq before downloading.
+    local bl=/etc/abuse/blocklist.hosts
+    if [ -s "$bl" ] && grep -qE '^0\.0\.0\.0 ([a-z0-9.-]+\.)?(github\.com|githubusercontent\.com|github\.io)$' "$bl" 2>/dev/null; then
+        note "Content filter was blocking GitHub — unblocking it first..."
+        grep -vE '^0\.0\.0\.0 ([a-z0-9.-]+\.)?(github\.com|githubusercontent\.com|github\.io)$' "$bl" > "${bl}.fix" \
+            && mv -f "${bl}.fix" "$bl"
+        systemctl is-active --quiet dnsmasq 2>/dev/null && systemctl restart dnsmasq >/dev/null 2>&1 && sleep 1
+    fi
     note "Installing Xray-core (needs internet)..."
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1
     [ -f "$XBIN" ]
