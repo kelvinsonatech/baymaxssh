@@ -2983,12 +2983,12 @@ for s in ssh dropbear ws-proxy stunnel4 xray dnsmasq; do
     if systemctl is-active --quiet "$s" 2>/dev/null; then svc+=" ${G}●${NC}${GRY}${s}${NC}"; else svc+=" ${R}○${NC}${GRY}${s}${NC}"; fi
 done
 echo ""
-echo -e "  ${TEAL}${BOLD} ██╗     ██╗████████╗██████╗  ██████╗ ███╗   ██╗██╗  ██╗${NC}"
-echo -e "  ${TEAL}${BOLD} ██║     ██║╚══██╔══╝██╔══██╗██╔═══██╗████╗  ██║╚██╗██╔╝${NC}"
-echo -e "  ${SKY}${BOLD} ██║     ██║   ██║   ██████╔╝██║   ██║██╔██╗ ██║ ╚███╔╝ ${NC}"
-echo -e "  ${SKY}${BOLD} ██║     ██║   ██║   ██╔══██╗██║   ██║██║╚██╗██║ ██╔██╗ ${NC}"
-echo -e "  ${PINK}${BOLD} ███████╗██║   ██║   ██║  ██║╚██████╔╝██║ ╚████║██╔╝ ██╗${NC}"
-echo -e "  ${PINK}${BOLD} ╚══════╝╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝${NC}"
+echo -e "   ${TEAL} ██████╗ ██████╗ ${SKY}██╗   ██╗${PINK}██████╗ ███╗   ██╗${NC}"
+echo -e "   ${TEAL}██╔════╝██╔════╝ ${SKY}██║   ██║${PINK}██╔══██╗████╗  ██║${NC}"
+echo -e "   ${TEAL}╚█████╗ ╚█████╗  ${SKY}███████║${PINK}██████╔╝██╔██╗ ██║${NC}"
+echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
+echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
+echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
 echo -e "        ${GRY}ws · ssl · openssh · dropbear · v2ray  ${W}${BOLD}VPN SERVER${NC}"
 echo ""
 echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
