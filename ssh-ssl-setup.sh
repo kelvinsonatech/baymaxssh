@@ -936,7 +936,11 @@ _write_wildcards() {
     {
         local d
         for d in $DOH_BOOTSTRAP; do echo "address=/$d/0.0.0.0"; done
-        [ -s "$ABUSE_DIR/curated.list" ] && awk 'NF{print "address=/" $1 "/0.0.0.0"}' "$ABUSE_DIR/curated.list"
+        # Only real domain lines. NEVER emit comment/junk lines: in dnsmasq,
+        # "address=/#/0.0.0.0" means "match EVERY domain" — a stray '#' line
+        # here once blocked the entire internet for all users.
+        [ -s "$ABUSE_DIR/curated.list" ] && \
+            awk '$1 ~ /^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9-]*$/ {print "address=/" $1 "/0.0.0.0"}' "$ABUSE_DIR/curated.list"
     } > /etc/dnsmasq.d/abuse-guard-wild.conf 2>/dev/null || true
 }
 # Admin-curated well-known torrent sites & proxy mirrors — always blocked,
@@ -1388,7 +1392,7 @@ tracker.bt4g.com
 CBEOF
     local added
     added=$(awk 'FNR==NR { if ($1=="0.0.0.0") have[$2]=1; next }
-         !($1 in have) { print "0.0.0.0 " $1 }' "$BLOCK_HOSTS" "$cl" | tee -a "$BLOCK_HOSTS" | wc -l)
+         $1 ~ /^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9-]*$/ && !($1 in have) { print "0.0.0.0 " $1 }' "$BLOCK_HOSTS" "$cl" | tee -a "$BLOCK_HOSTS" | wc -l)
     mkdir -p "$ABUSE_DIR" 2>/dev/null
     cp -f "$cl" "$ABUSE_DIR/curated.list" 2>/dev/null
     rm -f "$cl"
