@@ -72,7 +72,9 @@ malicious feed, never the torrent/carding core); (2) enable/refresh fail-open
 resolver; (3) cron watchdog every minute lifts enforcement if dnsmasq stops
 answering. Any future filter change must preserve fail-open.
 
-**Torrent enforcement = peer-discovery denial, never DPI (re-applied Aug 6 2026 after a brief hard revert).** Block
+**SCRIPT STATE (Aug 6 2026, end of day): user hard-reverted to the post-watermark commit.** Everything after it is GONE from the script: tracker/DHT hardening, DHT IP drops, INFRA_ALLOW, xray_install self-heal, torrent-only feed trim, web panel. Feeds again include fraud/scam/phishing/TIF, and the GitHub-in-feed Xray-install failure can recur. The curated-list `#`-comment bug never existed at this state (comments came later) — but if trackers are ever re-added to CBEOF, NO comment lines (see below). User reverts aggressively; keep changes small and expect rollbacks.
+
+**Torrent enforcement = peer-discovery denial, never DPI (design; currently reverted out).** Block
 public trackers + DHT bootstrap HOSTNAMES via the DNS filter (curated list +
 wildcards) AND drop NEW packets to hard-coded DHT router IPs
 (router.bittorrent.com/utorrent/transmissionbt) in the egress chain AFTER the
@@ -84,9 +86,9 @@ permanently ruled out (don't-slow-server invariant). Kill the SOURCE
 (trackers/DHT/piracy domains) and torrenting fails regardless of app. Never add
 a BitTorrent-handshake string match on the data path.
 
-**Feed scope = torrent/piracy ONLY (user rule, re-affirmed Aug 6 2026).** After the hard revert restored fraud/scam/phishing/TIF feeds, YouTube/TikTok complaints followed; feeds are back to blocklistproject torrent + hagezi anti-piracy only. Popular platforms (google/youtube/tiktok/socials/netflix) sit in INFRA_ALLOW so no feed can ever block them.
+**Feed scope preference: torrent/piracy ONLY (user rule — currently NOT in script due to revert).** After the hard revert restored fraud/scam/phishing/TIF feeds, YouTube/TikTok complaints followed; feeds are back to blocklistproject torrent + hagezi anti-piracy only. Popular platforms (google/youtube/tiktok/socials/netflix) sit in INFRA_ALLOW so no feed can ever block them.
 
-**Infra allowlist (re-applied Aug 6 2026).** Aggregated feeds once swept in github.com —
+**Infra allowlist (design; currently reverted out).** Aggregated feeds once swept in github.com —
 dnsmasq answered 0.0.0.0, curl looped back to the server's own :443 and failed
 with a cert-name mismatch, breaking Xray install. `INFRA_ALLOW` (GitHub hosts,
 debian/ubuntu mirrors, letsencrypt, cloudflare) is stripped from BLOCK_HOSTS by
