@@ -683,7 +683,7 @@ DHT_BOOTSTRAP_IPS="67.215.246.10 82.221.103.244 87.98.162.88 87.98.162.89"
 # A feed once shipped github.com → dnsmasq answered 0.0.0.0 → curl looped back
 # to our own :443 and failed with a certificate-name mismatch, breaking Xray
 # install. Entries match the domain AND all its subdomains.
-INFRA_ALLOW="github.com githubusercontent.com github.io githubassets.com codeload.github.com api.github.com objects.githubusercontent.com raw.githubusercontent.com release-assets.githubusercontent.com debian.org ubuntu.com launchpad.net letsencrypt.org cloudflare.com"
+INFRA_ALLOW="github.com githubusercontent.com github.io githubassets.com codeload.github.com api.github.com objects.githubusercontent.com raw.githubusercontent.com release-assets.githubusercontent.com debian.org ubuntu.com launchpad.net letsencrypt.org cloudflare.com google.com googlevideo.com googleapis.com gstatic.com youtube.com ytimg.com youtu.be tiktok.com tiktokcdn.com tiktokv.com facebook.com fbcdn.net instagram.com whatsapp.com whatsapp.net twitter.com x.com twimg.com netflix.com nflxvideo.net"
 mkdir -p "$ABUSE_DIR"
 
 # ---------- egress firewall (v4 + v6) ----------
@@ -1425,13 +1425,11 @@ fetch_blocklist() {
     # Mixed hosts-format and bare-domain feeds (awk below handles both);
     # merged, normalized and deduplicated. If every
     # fetch fails, the previous blocklist is kept untouched.
+    # Torrent/piracy ONLY (user rule, Aug 6 2026): no fraud/scam/phishing/TIF
+    # feeds — they are aggressive and sweep in innocent popular sites.
     local urls="
 https://raw.githubusercontent.com/blocklistproject/Lists/master/torrent.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
-https://raw.githubusercontent.com/blocklistproject/Lists/master/fraud.txt
-https://raw.githubusercontent.com/blocklistproject/Lists/master/scam.txt
-https://raw.githubusercontent.com/blocklistproject/Lists/master/phishing.txt
-https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
 "
     # Fast path: if a non-trivial list was built in the last 24h, reuse it —
     # re-enabling protection shouldn't re-download megabytes of feeds.
