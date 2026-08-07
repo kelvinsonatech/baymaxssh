@@ -84,6 +84,8 @@ permanently ruled out (don't-slow-server invariant). Kill the SOURCE
 (trackers/DHT/piracy domains) and torrenting fails regardless of app. Never add
 a BitTorrent-handshake string match on the data path.
 
+**Feed scope = torrent/piracy ONLY (user rule, re-affirmed Aug 6 2026).** After the hard revert restored fraud/scam/phishing/TIF feeds, YouTube/TikTok complaints followed; feeds are back to blocklistproject torrent + hagezi anti-piracy only. Popular platforms (google/youtube/tiktok/socials/netflix) sit in INFRA_ALLOW so no feed can ever block them.
+
 **Infra allowlist (re-applied Aug 6 2026).** Aggregated feeds once swept in github.com —
 dnsmasq answered 0.0.0.0, curl looped back to the server's own :443 and failed
 with a cert-name mismatch, breaking Xray install. `INFRA_ALLOW` (GitHub hosts,
