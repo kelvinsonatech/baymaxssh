@@ -93,6 +93,14 @@ debian/ubuntu mirrors, letsencrypt, cloudflare) is stripped from BLOCK_HOSTS by
 lookalikes (evil-github.com stays blockable). Any new download source the
 script depends on must be added to INFRA_ALLOW.
 
+**NEVER put comment lines in curated.list (Aug 6, 2026 outage).** The wildcard
+generator turned every line into `address=/$1/0.0.0.0`; a `#` comment line
+became `address=/#/0.0.0.0`, and dnsmasq treats `#` as MATCH-ALL — every domain
+on the server resolved to 0.0.0.0 (google.com dead for all users). Generators
+now regex-validate each line as a real domain before emitting, but keep
+CBEOF comment-free anyway, and after any curated-list change verify
+`/etc/dnsmasq.d/abuse-guard-wild.conf` contains no `address=/#/` entry.
+
 **VPN-infra immunity:** never block tcp/443 to well-known resolver IPs —
 HTTP Custom / injector configs use 1.1.1.1 / 8.8.8.8 etc. as bug-host/proxy
 SNI on 443, so those DoH blocks clip the user's own tunnel. Keep DoT(853) blocks ONLY — no 443 blocking in any form (tcp or udp/QUIC); port-53 redirect stays the primary
