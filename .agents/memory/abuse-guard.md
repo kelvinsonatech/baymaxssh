@@ -72,9 +72,7 @@ malicious feed, never the torrent/carding core); (2) enable/refresh fail-open
 resolver; (3) cron watchdog every minute lifts enforcement if dnsmasq stops
 answering. Any future filter change must preserve fail-open.
 
-**REVERTED Aug 6 2026 — not in script anymore (user hard-reverted to pre-web-panel).** The tracker/DHT hostname blocks, DHT bootstrap IP drops, INFRA_ALLOW strip, and xray_install GitHub self-heal were all removed by the revert. The github.com-in-feed bug (DNS 0.0.0.0 -> curl cert mismatch -> Xray install/443 handover fails) is therefore LIVE again; re-apply the infra allowlist if it recurs.
-
-**Torrent enforcement = peer-discovery denial, never DPI (design, currently reverted).** Block
+**Torrent enforcement = peer-discovery denial, never DPI (re-applied Aug 6 2026 after a brief hard revert).** Block
 public trackers + DHT bootstrap HOSTNAMES via the DNS filter (curated list +
 wildcards) AND drop NEW packets to hard-coded DHT router IPs
 (router.bittorrent.com/utorrent/transmissionbt) in the egress chain AFTER the
@@ -86,7 +84,7 @@ permanently ruled out (don't-slow-server invariant). Kill the SOURCE
 (trackers/DHT/piracy domains) and torrenting fails regardless of app. Never add
 a BitTorrent-handshake string match on the data path.
 
-**Infra allowlist (design, currently reverted — see note above).** Aggregated feeds once swept in github.com —
+**Infra allowlist (re-applied Aug 6 2026).** Aggregated feeds once swept in github.com —
 dnsmasq answered 0.0.0.0, curl looped back to the server's own :443 and failed
 with a cert-name mismatch, breaking Xray install. `INFRA_ALLOW` (GitHub hosts,
 debian/ubuntu mirrors, letsencrypt, cloudflare) is stripped from BLOCK_HOSTS by
