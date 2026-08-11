@@ -2961,7 +2961,14 @@ hy_ensure_cert() {
 hy_write_config() {
     mkdir -p "$HY_DIR"
     local obfs; obfs=$(cat "$HY_OBFS_FILE" 2>/dev/null)
-    [ -z "$obfs" ] && { obfs=$(openssl rand -hex 8); echo "$obfs" > "$HY_OBFS_FILE"; }
+    # Obfs is one shared value for the whole server. Like other UDP panels,
+    # default it to the FIRST username so clients have less to type. It is
+    # stored once and never changes afterwards (or later clients would break).
+    if [ -z "$obfs" ]; then
+        obfs=$(awk -F: 'NF{print $1; exit}' "$HY_USERS" 2>/dev/null)
+        [ -z "$obfs" ] && obfs=$(openssl rand -hex 8)
+        echo "$obfs" > "$HY_OBFS_FILE"
+    fi
     local pwlist="" line first=1
     while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -3052,6 +3059,9 @@ hy_activate() {
     case "$u$p" in *:*) err "Username/password cannot contain ':'"; pause; return;; esac
     mkdir -p "$HY_DIR"
     if grep -q "^${u}:" "$HY_USERS" 2>/dev/null; then err "User '$u' already exists."; pause; return; fi
+    # First user ever → obfs becomes this username (even if an old obfs file
+    # was left behind by an earlier failed attempt). Never changed afterwards.
+    if ! grep -q . "$HY_USERS" 2>/dev/null; then echo "$u" > "$HY_OBFS_FILE"; fi
     echo "${u}:${p}" >> "$HY_USERS"
     hy_ensure_cert
     hy_write_config
