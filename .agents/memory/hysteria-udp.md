@@ -20,7 +20,10 @@ Self-signed cert → clients must enable "allow insecure".
 REDIRECTs the whole UDP range 20000-50000 to it. Range + base are hardcoded in
 the `/usr/local/bin/hysteria-porthop up|down` helper AND in the installer vars
 `HY_PORT/HY_HOP_LO/HY_HOP_HI` — **keep them in sync** (helper is a quoted
-heredoc so it can't read the vars).
+heredoc so it can't read the vars). The helper must `export PATH` with sbin
+dirs first — systemd's minimal PATH misses /usr/sbin on some distros and
+iptables becomes "command not found" (same lesson as abuse-guard); installer
+also apt-installs iptables if absent.
 
 **Why it can't break other protocols:** all rules are UDP-only. Every other
 protocol (SSH/SSL/WS/V2Ray) is TCP; SlowDNS is UDP 53, outside 20000-50000. The
