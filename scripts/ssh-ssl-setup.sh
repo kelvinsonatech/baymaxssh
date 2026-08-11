@@ -2983,9 +2983,17 @@ JSON
 # Idempotent port-hopping + firewall helper, called by the unit on start/stop so
 # the rules survive reboots and are cleaned up on deactivate. UDP only.
 hy_write_porthop() {
+    # Minimal images may lack iptables entirely — install it first.
+    if ! PATH="/usr/sbin:/sbin:/usr/local/sbin:$PATH" command -v iptables >/dev/null 2>&1; then
+        echo "  installing iptables..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iptables >/dev/null 2>&1
+    fi
     cat > /usr/local/bin/hysteria-porthop <<'PHEOF'
 #!/bin/bash
 # Values MUST match HY_PORT / HY_HOP_LO / HY_HOP_HI in the installer.
+# systemd runs with a minimal PATH that misses sbin on some distros, which
+# makes iptables "command not found" — always fix PATH first.
+export PATH="/usr/sbin:/sbin:/usr/local/sbin:$PATH"
 IFACE=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}'); [ -z "$IFACE" ] && IFACE=eth0
 LO=20000; HI=50000; PORT=36712
 add(){
@@ -3120,9 +3128,6 @@ hysteria_menu() {
             row "$col" "${GR}STATUS${NC}  ${R}○ not active${NC}"
         fi
         line_bot "$col"; echo ""
-        echo -e "  ${GR}Fast QUIC/UDP tunnel for data plans — great for gaming &${NC}"
-        echo -e "  ${GR}streaming. Uses username/password, not payload/bug-host.${NC}"
-        echo ""
         menu_item "1" "⚡" "Activate / add user"      "$G"
         menu_item "2" "📋" "Show connection details"  "$SKY"
         menu_item "3" "🗑 " "Remove a user"            "$ORANGE"
