@@ -14,11 +14,15 @@ binary causes "Exec format error"; always `curl -fL`, run `--version` (v1 has
 no `version` subcommand) to validate, and never trust a mere `[ -x ]` check —
 delete corrupt leftovers or the installer skips re-download forever.
 
-**Auth format:** users are `username:password` lines in `/etc/hysteria/users`,
-emitted into Hysteria's `auth.mode=passwords` list. That combined `user:pass`
-string is exactly what UDP client apps (UDP Custom / HTTP Injector UDP /
-NapsternetV) send. Shared `obfs` password stored in `/etc/hysteria/obfs`.
-Self-signed cert → clients must enable "allow insecure".
+**Auth format (critical):** AGN-style UDP client apps authenticate with the
+**password ONLY**, not `username:password`. Users are stored as `username:password`
+lines in `/etc/hysteria/users` for our own bookkeeping, but `hy_write_config`
+must emit ONLY the password part (`${line#*:}`) into Hysteria's
+`auth.mode=passwords` list. Emitting the full `user:pass` string was the bug
+that made the app silently fail to connect (login never matched). Shared `obfs`
+stored in `/etc/hysteria/obfs`, defaulted to the first username (matches AGN
+"Li-Quest" panels where OBFS(U)==first user). Self-signed cert → clients must
+enable "allow insecure".
 
 **Port hopping:** Hysteria listens on ONE base UDP port (36712); iptables
 REDIRECTs the whole UDP range 20000-50000 to it. Range + base are hardcoded in
