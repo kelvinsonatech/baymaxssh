@@ -1,0 +1,54 @@
+1. Shebang and IP fetch
+#!/bin/bash
+MYIP=$(wget -qO- ipv4.icanhazip.com)
+
+Standard fare. Gets the server’s public IP to show at the end.
+
+2. Update system and install dependencies
+apt-get update -y >/dev/null 2>&1
+apt-get install -y wget curl unzip ufw >/dev/null 2>&1
+
+Ensures the basics are there. ufw is for the firewall rules later.
+
+3. Download and install the AGN-UDP binary
+wget -qO /usr/local/bin/agn-udp https://github.com/wolfbekkk/AGN-UDP/raw/main/agn-udp-linux-amd64
+chmod +x /usr/local/bin/agn-udp
+
+The heart of the script. It pulls a pre‑compiled binary (likely a fork of badvpn-udpgw with minor modifications) and marks it executable. The binary is nothing more than a UDP‑over‑TCP tunnel: it listens on a TCP port and forwards any incoming traffic as UDP to a local service (like a game server or DNS resolver). The “AGN” branding is just the author’s ego. It’s not a new protocol; it’s a repackaged tool.
+
+4. Create systemd service file
+cat <<EOF > /etc/systemd/system/agnudp.service
+[Unit]
+Description=AGN UDP Gateway Service
+After=network.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/agn-udp --listen-addr 0.0.0.0:7300 --udp-buffer-size 65536
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+Sets up the binary to start on boot and restart if it crashes. The command‑line flags are identical to badvpn-udpgw: --listen-addr specifies the TCP port (usually 7300) where clients connect; the binary then forwards decrypted UDP packets to wherever the client requests (often a local SOCKS proxy or directly to internet). The buffer size tweak is a cheap attempt to improve throughput.
+
+5. Enable and start the service
+systemctl daemon-reload
+systemctl enable --now agnudp.service
+
+Standard systemd activation.
+
+6. Open firewall ports
+ufw allow 7300/tcp >/dev/null 2>&1
+ufw allow 22/tcp >/dev/null 2>&1
+
+Opens the TCP port for the UDP gateway and SSH. Nothing clever.
+
+7. Print success message
+clear
+echo -e "\e[1;32mAGN-UDP Installed Successfully!\e[0m"
+echo -e "Server IP  : $MYIP"
+echo -e "Port       : 7300"
+echo -e "Usage      : Connect your game/VoIP client to this port via SOCKS/HTTP Proxy"
+
+That’s the entire s

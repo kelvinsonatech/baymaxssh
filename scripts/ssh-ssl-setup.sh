@@ -2907,6 +2907,240 @@ abuse_menu() {
     done
 }
 
+# ═══════════════════════════════════════════
+# UDP (HYSTERIA) — high-speed QUIC/UDP tunnel, menu-activated
+# ═══════════════════════════════════════════
+# Separate from the SSL-payload/bug-host side: Hysteria is UDP and does NOT use
+# payloads or bug hosts. It listens on ONE base UDP port and iptables REDIRECTs
+# a whole UDP port-hopping range onto it, so throttling a single port can't kill
+# it. UDP-only + a dedicated INPUT/nat rule set => it never touches the TCP
+# protocols (SSH/SSL/WS/V2Ray) or SlowDNS (UDP 53, outside the range).
+HY_BIN=/usr/local/bin/hysteria
+HY_DIR=/etc/hysteria
+HY_CONF=$HY_DIR/config.json
+HY_USERS=$HY_DIR/users
+HY_OBFS_FILE=$HY_DIR/obfs
+HY_UNIT=/etc/systemd/system/hysteria-udp.service
+HY_PORT=36712          # base UDP listen port (kept in sync with the porthop helper)
+HY_HOP_LO=20000        # port-hopping range low
+HY_HOP_HI=50000        # port-hopping range high
+
+hy_active() { systemctl is-active --quiet hysteria-udp 2>/dev/null; }
+
+hy_install() {
+    [ -x "$HY_BIN" ] && return 0
+    note "Installing Hysteria (UDP) — needs internet..."
+    local arch url
+    case "$(uname -m)" in
+        x86_64|amd64) arch=amd64;;
+        aarch64|arm64) arch=arm64;;
+        armv7l|armv7) arch=arm;;
+        *) arch=amd64;;
+    esac
+    url="https://github.com/apernet/hysteria/releases/download/app/v1.3.5/hysteria-linux-${arch}"
+    curl -L -o "$HY_BIN" "$url" >/dev/null 2>&1 || wget -qO "$HY_BIN" "$url" >/dev/null 2>&1
+    chmod +x "$HY_BIN" 2>/dev/null
+    [ -x "$HY_BIN" ] && "$HY_BIN" version >/dev/null 2>&1
+}
+
+hy_ensure_cert() {
+    [ -s "$HY_DIR/hysteria.crt" ] && [ -s "$HY_DIR/hysteria.key" ] && return 0
+    mkdir -p "$HY_DIR"
+    openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+        -subj "/CN=${HOST_DISPLAY:-hysteria}" \
+        -keyout "$HY_DIR/hysteria.key" -out "$HY_DIR/hysteria.crt" >/dev/null 2>&1
+}
+
+# Build config.json from the users file. Each user is a "username:password"
+# entry in Hysteria's passwords auth list — the format UDP client apps send.
+hy_write_config() {
+    mkdir -p "$HY_DIR"
+    local obfs; obfs=$(cat "$HY_OBFS_FILE" 2>/dev/null)
+    [ -z "$obfs" ] && { obfs=$(openssl rand -hex 8); echo "$obfs" > "$HY_OBFS_FILE"; }
+    local pwlist="" line first=1
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        if [ $first -eq 1 ]; then pwlist="\"$line\""; first=0
+        else pwlist="$pwlist, \"$line\""; fi
+    done < "$HY_USERS"
+    cat > "$HY_CONF" <<JSON
+{
+  "listen": ":$HY_PORT",
+  "cert": "$HY_DIR/hysteria.crt",
+  "key": "$HY_DIR/hysteria.key",
+  "up_mbps": 100,
+  "down_mbps": 100,
+  "disable_udp": false,
+  "obfs": "$obfs",
+  "auth": {
+    "mode": "passwords",
+    "config": [$pwlist]
+  }
+}
+JSON
+}
+
+# Idempotent port-hopping + firewall helper, called by the unit on start/stop so
+# the rules survive reboots and are cleaned up on deactivate. UDP only.
+hy_write_porthop() {
+    cat > /usr/local/bin/hysteria-porthop <<'PHEOF'
+#!/bin/bash
+# Values MUST match HY_PORT / HY_HOP_LO / HY_HOP_HI in the installer.
+IFACE=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}'); [ -z "$IFACE" ] && IFACE=eth0
+LO=20000; HI=50000; PORT=36712
+add(){
+  iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport $LO:$HI -j REDIRECT --to-ports $PORT 2>/dev/null || \
+    iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport $LO:$HI -j REDIRECT --to-ports $PORT
+  iptables -C INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport $PORT -j ACCEPT
+  iptables -C INPUT -p udp --dport $LO:$HI -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport $LO:$HI -j ACCEPT
+}
+del(){
+  while iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport $LO:$HI -j REDIRECT --to-ports $PORT 2>/dev/null; do :; done
+  iptables -D INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null
+  iptables -D INPUT -p udp --dport $LO:$HI -j ACCEPT 2>/dev/null
+}
+case "$1" in up) add;; down) del;; *) echo "usage: $0 up|down";; esac
+PHEOF
+    chmod +x /usr/local/bin/hysteria-porthop
+    # ufw (if active) needs the range opened explicitly too.
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
+        ufw allow "${HY_PORT}"/udp >/dev/null 2>&1
+        ufw allow "${HY_HOP_LO}:${HY_HOP_HI}"/udp >/dev/null 2>&1
+    fi
+}
+
+hy_write_unit() {
+    cat > "$HY_UNIT" <<UNIT
+[Unit]
+Description=Hysteria UDP Tunnel (high-speed)
+After=network.target
+[Service]
+Type=simple
+ExecStartPre=/usr/local/bin/hysteria-porthop up
+ExecStart=$HY_BIN server --config $HY_CONF
+ExecStopPost=/usr/local/bin/hysteria-porthop down
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+}
+
+hy_activate() {
+    section "ACTIVATE UDP (HYSTERIA)" "$G"
+    if ! hy_install; then err "Hysteria install failed — check the server's internet."; pause; return; fi
+    local u p
+    read -rp "$(echo -e "  ${C}Username${NC} : ")" u
+    [ -z "$u" ] && { err "Username can't be empty."; pause; return; }
+    read -rp "$(echo -e "  ${C}Password${NC} : ")" p
+    [ -z "$p" ] && { err "Password can't be empty."; pause; return; }
+    case "$u$p" in *:*) err "Username/password cannot contain ':'"; pause; return;; esac
+    mkdir -p "$HY_DIR"
+    if grep -q "^${u}:" "$HY_USERS" 2>/dev/null; then err "User '$u' already exists."; pause; return; fi
+    echo "${u}:${p}" >> "$HY_USERS"
+    hy_ensure_cert
+    hy_write_config
+    hy_write_porthop
+    hy_write_unit
+    systemctl enable hysteria-udp >/dev/null 2>&1
+    systemctl restart hysteria-udp >/dev/null 2>&1
+    sleep 2
+    if hy_active; then
+        ok "UDP user '${W}$u${NC}' added — service running."
+        hy_show
+    else
+        err "Hysteria failed to start. Last errors:"
+        journalctl -u hysteria-udp -n 8 --no-pager 2>/dev/null | sed 's/^/    /'
+        # roll the just-added user back so a bad entry can't wedge the config
+        grep -v "^${u}:" "$HY_USERS" > "$HY_USERS.tmp" 2>/dev/null && mv "$HY_USERS.tmp" "$HY_USERS"
+        hy_write_config
+    fi
+    pause
+}
+
+hy_show() {
+    if [ ! -s "$HY_USERS" ]; then err "No UDP users yet — activate first."; return; fi
+    local obfs; obfs=$(cat "$HY_OBFS_FILE" 2>/dev/null)
+    local col="$SKY"; echo ""; line_top "$col"
+    crow "$col" "${W}${BOLD}UDP (HYSTERIA) CONNECTION${NC}"; line_mid "$col"
+    row "$col" "${GR}Server${NC}    ${W}${SERVER_IP}${NC}"
+    row "$col" "${GR}UDP ports${NC} ${W}${HY_HOP_LO}-${HY_HOP_HI}${NC}"
+    row "$col" "${GR}Obfs${NC}      ${W}${obfs}${NC}"
+    line_mid "$col"
+    crow "$col" "${GR}Users  (username : password)${NC}"
+    local uu pp
+    while IFS=: read -r uu pp; do [ -n "$uu" ] && row "$col" "${W}${uu}${NC} : ${W}${pp}${NC}"; done < "$HY_USERS"
+    line_bot "$col"
+    echo ""
+    echo -e "  ${GR}In your UDP app (UDP Custom / HTTP Injector UDP / NapsternetV):${NC}"
+    echo -e "    ${GR}• Server   : ${W}${SERVER_IP}${NC}"
+    echo -e "    ${GR}• Port(s)  : ${W}${HY_HOP_LO}-${HY_HOP_HI}${NC} ${GR}(port hopping)${NC}"
+    echo -e "    ${GR}• Obfs     : ${W}${obfs}${NC}"
+    echo -e "    ${GR}• Username & password: from the list above${NC}"
+    echo -e "    ${GR}• Turn ON 'Allow insecure / self-signed certificate'${NC}"
+}
+
+hy_remove_user() {
+    if [ ! -s "$HY_USERS" ]; then err "No users."; pause; return; fi
+    echo -e "  ${C}Users:${NC}"; sed 's/:.*//' "$HY_USERS" | nl -w2 -s') '
+    local ru
+    read -rp "$(echo -e "  ${P}❯${NC} username to remove : ")" ru
+    [ -z "$ru" ] && { note "Cancelled."; pause; return; }
+    if grep -q "^${ru}:" "$HY_USERS"; then
+        grep -v "^${ru}:" "$HY_USERS" > "$HY_USERS.tmp" && mv "$HY_USERS.tmp" "$HY_USERS"
+        hy_write_config
+        systemctl restart hysteria-udp >/dev/null 2>&1
+        ok "Removed '$ru'."
+    else
+        err "No such user."
+    fi
+    pause
+}
+
+hy_deactivate() {
+    section "DEACTIVATE UDP" "$R"
+    systemctl stop hysteria-udp >/dev/null 2>&1
+    systemctl disable hysteria-udp >/dev/null 2>&1
+    /usr/local/bin/hysteria-porthop down 2>/dev/null
+    ok "UDP (Hysteria) deactivated. Users stay saved for next time."
+    pause
+}
+
+hysteria_menu() {
+    while true; do
+        section "UDP (HYSTERIA) — HIGH SPEED" "$SKY"
+        local col="$SKY"; line_top "$col"
+        if hy_active; then
+            row "$col" "${GR}STATUS${NC}  ${G}● active${NC}"
+            row "$col" "${GR}PORTS${NC}   ${W}UDP ${HY_HOP_LO}-${HY_HOP_HI}${NC}"
+            row "$col" "${GR}USERS${NC}   ${W}$(grep -c . "$HY_USERS" 2>/dev/null || echo 0)${NC}"
+        else
+            row "$col" "${GR}STATUS${NC}  ${R}○ not active${NC}"
+        fi
+        line_bot "$col"; echo ""
+        echo -e "  ${GR}Fast QUIC/UDP tunnel for data plans — great for gaming &${NC}"
+        echo -e "  ${GR}streaming. Uses username/password, not payload/bug-host.${NC}"
+        echo ""
+        menu_item "1" "⚡" "Activate / add user"      "$G"
+        menu_item "2" "📋" "Show connection details"  "$SKY"
+        menu_item "3" "🗑 " "Remove a user"            "$ORANGE"
+        menu_item "4" "🧹" "Deactivate UDP"           "$R"
+        menu_item "0" "↩ " "Back to main menu"        "$GR"
+        echo ""
+        read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" HO
+        case "$HO" in
+            1) hy_activate ;;
+            2) hy_show; pause ;;
+            3) hy_remove_user ;;
+            4) hy_deactivate ;;
+            0) return ;;
+            *) err "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
 menu_item() {  # menu_item NUM ICON "Label" color
     echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
 }
@@ -2927,6 +3161,7 @@ while true; do
     menu_item "10" "🔄" "Restart all services"    "$Y"
     menu_item "11" "🐌" "SlowDNS info"            "$PINK"
     menu_item "12" "🛡 " "Abuse protection"        "$LIME"
+    menu_item "13" "⚡" "UDP (Hysteria) high-speed" "$SKY"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -2943,6 +3178,7 @@ while true; do
         10) restart_services ;;
         11) slowdns_info ;;
         12) abuse_menu ;;
+        13) hysteria_menu ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
