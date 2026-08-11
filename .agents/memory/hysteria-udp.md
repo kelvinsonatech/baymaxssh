@@ -7,8 +7,12 @@ description: How the high-speed UDP (Hysteria 1) tunnel is wired into ssh-ssl-se
 
 Added Aug 2026 from the user's AGN-UDP paste. AGN-UDP is a **Hysteria 1** fork
 (the paste's "badvpn-udpgw" description is wrong). Implemented with upstream
-Hysteria 1 (`apernet/hysteria` release tag `app/v1.3.5`, asset
-`hysteria-linux-<arch>`).
+Hysteria 1 (`apernet/hysteria` release tag `v1.3.5`, asset
+`hysteria-linux-<arch>`). Gotchas: v1 release tags are plain `vX.Y.Z` — the
+`app/vX.Y.Z` prefix belongs to Hysteria 2 and 404s, and a 404 page saved as the
+binary causes "Exec format error"; always `curl -fL`, run `--version` (v1 has
+no `version` subcommand) to validate, and never trust a mere `[ -x ]` check —
+delete corrupt leftovers or the installer skips re-download forever.
 
 **Auth format:** users are `username:password` lines in `/etc/hysteria/users`,
 emitted into Hysteria's `auth.mode=passwords` list. That combined `user:pass`
