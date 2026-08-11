@@ -2928,7 +2928,10 @@ HY_HOP_HI=50000        # port-hopping range high
 hy_active() { systemctl is-active --quiet hysteria-udp 2>/dev/null; }
 
 hy_install() {
-    [ -x "$HY_BIN" ] && return 0
+    # A previous failed download can leave a corrupt file behind — only trust
+    # a binary that actually runs, never just "file exists and is executable".
+    if [ -x "$HY_BIN" ] && "$HY_BIN" --version >/dev/null 2>&1; then return 0; fi
+    rm -f "$HY_BIN"
     note "Installing Hysteria (UDP) — needs internet..."
     local arch url
     case "$(uname -m)" in
@@ -2937,10 +2940,12 @@ hy_install() {
         armv7l|armv7) arch=arm;;
         *) arch=amd64;;
     esac
-    url="https://github.com/apernet/hysteria/releases/download/app/v1.3.5/hysteria-linux-${arch}"
-    curl -L -o "$HY_BIN" "$url" >/dev/null 2>&1 || wget -qO "$HY_BIN" "$url" >/dev/null 2>&1
+    url="https://github.com/apernet/hysteria/releases/download/v1.3.5/hysteria-linux-${arch}"
+    curl -fL -o "$HY_BIN" "$url" >/dev/null 2>&1 || wget -qO "$HY_BIN" "$url" >/dev/null 2>&1
     chmod +x "$HY_BIN" 2>/dev/null
-    [ -x "$HY_BIN" ] && "$HY_BIN" version >/dev/null 2>&1
+    # Must be a real ELF binary that runs, not an HTML error page.
+    if ! "$HY_BIN" --version >/dev/null 2>&1; then rm -f "$HY_BIN"; return 1; fi
+    return 0
 }
 
 hy_ensure_cert() {
