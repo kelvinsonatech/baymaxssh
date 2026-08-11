@@ -2956,8 +2956,10 @@ hy_ensure_cert() {
         -keyout "$HY_DIR/hysteria.key" -out "$HY_DIR/hysteria.crt" >/dev/null 2>&1
 }
 
-# Build config.json from the users file. Each user is a "username:password"
-# entry in Hysteria's passwords auth list — the format UDP client apps send.
+# Build config.json from the users file. Users are stored as "username:password"
+# for our own bookkeeping, but AGN-style UDP client apps authenticate with the
+# PASSWORD ONLY — so Hysteria's passwords list must contain just the passwords,
+# never "username:password", or the app's login never matches and it won't connect.
 hy_write_config() {
     mkdir -p "$HY_DIR"
     local obfs; obfs=$(cat "$HY_OBFS_FILE" 2>/dev/null)
@@ -2969,11 +2971,12 @@ hy_write_config() {
         [ -z "$obfs" ] && obfs=$(openssl rand -hex 8)
         echo "$obfs" > "$HY_OBFS_FILE"
     fi
-    local pwlist="" line first=1
+    local pwlist="" line pw first=1
     while IFS= read -r line; do
         [ -z "$line" ] && continue
-        if [ $first -eq 1 ]; then pwlist="\"$line\""; first=0
-        else pwlist="$pwlist, \"$line\""; fi
+        pw="${line#*:}"   # password = everything after the first ':'
+        if [ $first -eq 1 ]; then pwlist="\"$pw\""; first=0
+        else pwlist="$pwlist, \"$pw\""; fi
     done < "$HY_USERS"
     cat > "$HY_CONF" <<JSON
 {
@@ -3097,11 +3100,11 @@ hy_show() {
     while IFS=: read -r uu pp; do [ -n "$uu" ] && row "$col" "${W}${uu}${NC} : ${W}${pp}${NC}"; done < "$HY_USERS"
     line_bot "$col"
     echo ""
-    echo -e "  ${GR}In your UDP app (UDP Custom / HTTP Injector UDP / NapsternetV):${NC}"
+    echo -e "  ${GR}In your UDP app (UDP Custom / AGN UDP / NapsternetV):${NC}"
     echo -e "    ${GR}• Server   : ${W}${SERVER_IP}${NC}"
     echo -e "    ${GR}• Port(s)  : ${W}${HY_HOP_LO}-${HY_HOP_HI}${NC} ${GR}(port hopping)${NC}"
-    echo -e "    ${GR}• Obfs     : ${W}${obfs}${NC}"
-    echo -e "    ${GR}• Username & password: from the list above${NC}"
+    echo -e "    ${GR}• OBFS     : ${W}${obfs}${NC}"
+    echo -e "    ${GR}• Password : ${W}the password from the list above (NOT the username)${NC}"
     echo -e "    ${GR}• Turn ON 'Allow insecure / self-signed certificate'${NC}"
 }
 
