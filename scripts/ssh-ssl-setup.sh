@@ -3196,12 +3196,11 @@ zi_ensure_cert() {
 # ONLY, so the passwords list must contain just passwords, never username:password.
 zi_write_config() {
     mkdir -p "$ZI_DIR"
-    local obfs; obfs=$(cat "$ZI_OBFS_FILE" 2>/dev/null)
-    if [ -z "$obfs" ]; then
-        obfs=$(awk -F: 'NF{print $1; exit}' "$ZI_USERS" 2>/dev/null)
-        [ -z "$obfs" ] && obfs=$(openssl rand -hex 8)
-        echo "$obfs" > "$ZI_OBFS_FILE"
-    fi
+    # The ZIVPN app has NO obfs field — it hardcodes obfs "zivpn". The server
+    # MUST use exactly this string or the app's packets never match and it fails
+    # to connect. Never randomize it or set it to the username.
+    local obfs="zivpn"
+    echo "$obfs" > "$ZI_OBFS_FILE"
     local pwlist="" line pw first=1
     while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -3288,7 +3287,6 @@ zi_activate() {
     case "$u$p" in *:*) err "Username/password cannot contain ':'"; pause; return;; esac
     mkdir -p "$ZI_DIR"
     if grep -q "^${u}:" "$ZI_USERS" 2>/dev/null; then err "User '$u' already exists."; pause; return; fi
-    if ! grep -q . "$ZI_USERS" 2>/dev/null; then echo "$u" > "$ZI_OBFS_FILE"; fi
     echo "${u}:${p}" >> "$ZI_USERS"
     zi_ensure_cert
     zi_write_config
@@ -3323,12 +3321,10 @@ zi_show() {
     while IFS=: read -r uu pp; do [ -n "$uu" ] && row "$col" "${W}${uu}${NC} : ${W}${pp}${NC}"; done < "$ZI_USERS"
     line_bot "$col"
     echo ""
-    echo -e "  ${GR}In your ZIVPN app:${NC}"
-    echo -e "    ${GR}• Server   : ${W}${SERVER_IP}${NC}"
-    echo -e "    ${GR}• Port(s)  : ${W}${ZI_HOP_LO}-${ZI_HOP_HI}${NC} ${GR}(port hopping)${NC}"
-    echo -e "    ${GR}• OBFS     : ${W}${obfs}${NC}"
-    echo -e "    ${GR}• Password : ${W}the password from the list above (NOT the username)${NC}"
-    echo -e "    ${GR}• Turn ON 'Allow insecure / self-signed certificate'${NC}"
+    echo -e "  ${GR}In the ZIVPN app you enter only TWO things:${NC}"
+    echo -e "    ${GR}• udp server   : ${W}${SERVER_IP}${NC}"
+    echo -e "    ${GR}• udp password : ${W}the password from the list above${NC}"
+    echo -e "  ${GR}No port or obfs to type — the app has them built in (obfs=zivpn).${NC}"
 }
 
 zi_remove_user() {
