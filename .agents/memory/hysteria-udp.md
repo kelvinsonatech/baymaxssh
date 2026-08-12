@@ -42,3 +42,8 @@ they persist across reboot and vanish on deactivate.
 **Not a payload/bug-host replacement:** Hysteria is UDP/QUIC — it does NOT use
 payloads or bug hosts, so it will NOT work on zero-data/free-bundle tricks. It's
 for paid data (fast, gaming/streaming). Told the user this explicitly.
+
+## ZIVPN attempt — reverted, do not retry without a real device
+ZIVPN (Android app) menu option was added then FULLY reverted per user request. Config was made byte-identical to upstream `zahidbd2/udp-zivpn` (`:5667`, fixed `obfs:"zivpn"` — app has NO obfs field, `auth mode passwords`, password-only, hop 6000-19999→5667) and stock Hysteria 1.3.5 accepted a matching Hysteria client in local tests — but it still would NOT connect from the user's real ZIVPN app.
+**Why:** official ZIVPN uses its OWN forked binary (`udp-zivpn-linux-amd64`, ~hysteria 1.4.9), not stock hysteria; a local hysteria-vs-hysteria test cannot catch the real protocol/handshake difference. Do not claim ZIVPN == stock Hysteria + obfs=zivpn.
+**How to apply:** if ZIVPN is requested again, do NOT reuse the stock hysteria binary assuming compat. Use the upstream zivpn binary (security review first) or get the user to test on a real device early, and STOP after 1-2 failed real-device attempts instead of iterating blind.
