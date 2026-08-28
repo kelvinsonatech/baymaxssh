@@ -1757,7 +1757,19 @@ if [ -n "$NS_DOMAIN" ]; then
         printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
         systemctl restart systemd-resolved >/dev/null 2>&1
     fi
-    fuser -k 53/udp >/dev/null 2>&1   # anything else squatting on :53
+
+    # Never kill arbitrary UDP/53 owners: dnsmasq may be the enabled content
+    # filter. When it owns loopback:53, bind dnstt only to the server's local
+    # public address so both services coexist. Otherwise dnstt may use :53.
+    SLOWDNS_BIND=":53"
+    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+        if [ -n "$SERVER_IP" ] && ip -o addr show 2>/dev/null | grep -qw "$SERVER_IP"; then
+            SLOWDNS_BIND="${SERVER_IP}:53"
+        else
+            warn "SlowDNS cannot safely share UDP 53 with dnsmasq — public IP is not local"
+            SLOWDNS_BIND=""
+        fi
+    fi
 
     # --- Build dnstt-server. dnstt needs a modern Go (>=1.21); apt often ships
     #     one too old (Debian 11=1.15, 12=1.19), so we try the toolchain on PATH
@@ -1799,7 +1811,7 @@ if [ -n "$NS_DOMAIN" ]; then
         fi
     fi
 
-    if [ -x /usr/local/bin/dnstt-server ]; then
+    if [ -x /usr/local/bin/dnstt-server ] && [ -n "$SLOWDNS_BIND" ]; then
         mkdir -p /etc/slowdns
         # generate the server keypair once; reuse on re-runs
         if [ ! -s /etc/slowdns/server.key ] || [ ! -s /etc/slowdns/server.pub ]; then
@@ -1816,7 +1828,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/slowdns
-ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
+ExecStart=/usr/local/bin/dnstt-server -udp ${SLOWDNS_BIND} -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
 Restart=always
 RestartSec=3
 
@@ -2851,6 +2863,71 @@ xray_menu() {
     done
 }
 
+slowdns_repair() {
+    local ns bind old_unit rc=0
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    [ -n "$ns" ] && [ -x /usr/local/bin/dnstt-server ] || return 1
+    [ -s /etc/slowdns/server.key ] || return 1
+
+    # Free only systemd-resolved's local stub. Never kill arbitrary port-53
+    # processes because dnsmasq may be intentionally filtering DNS.
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
+        systemctl restart systemd-resolved >/dev/null 2>&1
+    fi
+
+    bind=":53"
+    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+        if [ -n "$SERVER_IP" ] && ip -o addr show 2>/dev/null | grep -qw "$SERVER_IP"; then
+            bind="${SERVER_IP}:53"
+        else
+            return 2
+        fi
+    fi
+
+    old_unit=$(mktemp)
+    [ -f /etc/systemd/system/slowdns.service ] \
+        && cp -f /etc/systemd/system/slowdns.service "$old_unit"
+    cat > /etc/systemd/system/slowdns.service <<EOF
+[Unit]
+Description=SlowDNS (dnstt) Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp ${bind} -privkey-file /etc/slowdns/server.key ${ns} 127.0.0.1:22
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable slowdns >/dev/null 2>&1
+    systemctl restart slowdns >/dev/null 2>&1
+    sleep 2
+    systemctl is-active --quiet slowdns 2>/dev/null || rc=1
+
+    # Open only SlowDNS's UDP port. No TCP or other protocol rule is changed.
+    if [ $rc -eq 0 ] && command -v ufw >/dev/null 2>&1; then
+        ufw allow 53/udp >/dev/null 2>&1
+    fi
+
+    if [ $rc -ne 0 ]; then
+        # Transaction safety: restore the exact previous unit if repair failed.
+        if [ -s "$old_unit" ]; then
+            cp -f "$old_unit" /etc/systemd/system/slowdns.service
+            systemctl daemon-reload >/dev/null 2>&1
+            systemctl restart slowdns >/dev/null 2>&1
+        fi
+    fi
+    rm -f "$old_unit"
+    return $rc
+}
+
 slowdns_info() {
     section "SLOWDNS (DNSTT)" "$PINK"
     local col="$PINK"
@@ -2876,7 +2953,167 @@ slowdns_info() {
     echo ""
     echo -e "  ${GR}Client: use NS '${W}${ns}${GR}', the public key above, and any${NC}"
     echo -e "  ${GR}SlowDNS-capable app (SSH account = your normal users).${NC}"
+    echo ""
+    menu_item "1" "🛠 " "Repair / restart SlowDNS" "$G"
+    menu_item "0" "↩ " "Back to main menu"        "$GR"
+    echo ""
+    read -rp "$(echo -e "  ${PINK}❯${NC} select an option : ")" sdopt
+    case "$sdopt" in
+        1)
+            echo ""
+            if fastdns_step "Repairing SlowDNS UDP 53 safely" slowdns_repair; then
+                ok "SlowDNS is running. No other protocol was changed."
+            else
+                err "Repair failed safely; the previous service was restored."
+                warn "Check the NS record and run: journalctl -u slowdns -n 30"
+            fi
+            pause
+            ;;
+        *) return ;;
+    esac
+}
+
+# ── FAST DNS (SlowDNS upstream-resolver booster) ──────────
+# Points the server's OWN upstream resolver at the fastest public pair
+# (1.1.1.1 primary + 8.8.8.8 fallback) with a short timeout. Every name
+# lookup made by traffic exiting the SlowDNS tunnel resolves through this,
+# so pages start loading sooner. It ONLY rewrites the upstream resolver —
+# it never touches port 53, dnstt, iptables, or any protocol, so it cannot
+# break SlowDNS or the other tunnels. Reversible and self-healing: if the
+# new resolver ever fails a live lookup, it auto-restores the old one.
+FASTDNS_MARK="$CONF_DIR/fastdns.on"
+FASTDNS_BAK="$CONF_DIR/resolv.fastdns.bak"
+FASTDNS_PRIMARY="1.1.1.1"
+FASTDNS_FALLBACK="8.8.8.8"
+
+fastdns_ready() {   # SlowDNS must be installed AND running
+    local ns; ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    [ -n "$ns" ] && [ -x /usr/local/bin/dnstt-server ] \
+        && systemctl is-active --quiet slowdns 2>/dev/null
+}
+
+fastdns_active() { [ -f "$FASTDNS_MARK" ]; }
+
+# content filter (abuse-guard) owns resolv.conf when it points at dnsmasq
+fastdns_filter_owns() {
+    systemctl is-active --quiet dnsmasq 2>/dev/null \
+        && grep -q '^nameserver[[:space:]]\+127\.0\.0\.1' /etc/resolv.conf 2>/dev/null
+}
+
+# animated step: fastdns_step "message" "shell command..."
+fastdns_step() {
+    local msg="$1"; shift
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    ( "$@" ) >/dev/null 2>&1 & local pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  ${SKY}%s${NC} ${W}%s${NC}" "${frames[$((i % 10))]}" "$msg"
+        i=$((i+1)); sleep 0.08
+    done
+    wait "$pid"; local rc=$?
+    if [ $rc -eq 0 ]; then printf "\r  ${G}✔${NC} ${W}%s${NC}\033[K\n" "$msg"
+    else printf "\r  ${R}✘${NC} ${W}%s${NC}\033[K\n" "$msg"; fi
+    return $rc
+}
+
+fastdns_verify() { getent hosts one.one.one.one >/dev/null 2>&1 || getent hosts cloudflare.com >/dev/null 2>&1; }
+
+fastdns_write_resolv() {
+    rm -f /etc/resolv.conf 2>/dev/null
+    printf 'nameserver %s\nnameserver %s\noptions timeout:2 attempts:2 rotate\n' \
+        "$FASTDNS_PRIMARY" "$FASTDNS_FALLBACK" > /etc/resolv.conf
+}
+
+fastdns_apply() {
+    section "ACTIVATE FAST DNS" "$TEAL"
+    if ! fastdns_ready; then
+        local col="$ORANGE"; line_top "$col"
+        crow "$col" "${W}${BOLD}⚠ SLOWDNS REQUIRED${NC}"; line_mid "$col"
+        row "$col" "${GR}Fast DNS boosts SlowDNS — activate SlowDNS first.${NC}"
+        row "$col" "${GR}Re-run the installer with an NS domain, then start it.${NC}"
+        line_bot "$col"; pause; return
+    fi
+    echo -e "  ${GR}Boosting SlowDNS with the fastest upstream resolvers${NC}"
+    echo -e "  ${GR}(${W}${FASTDNS_PRIMARY}${GR} primary · ${W}${FASTDNS_FALLBACK}${GR} fallback). This only changes${NC}"
+    echo -e "  ${GR}the resolver — no port, tunnel or protocol is touched.${NC}\n"
+
+    fastdns_step "Checking SlowDNS tunnel" sleep 0.6
+
+    if fastdns_filter_owns; then
+        # Abuse-guard's dnsmasq already forwards to 1.1.1.1 + 8.8.8.8.
+        # Overwriting resolv.conf here would disable the content filter, so
+        # we leave it in place — fast DNS is effectively already applied.
+        fastdns_step "Detected content filter — keeping it intact" sleep 0.6
+        fastdns_step "Confirming fast upstream via filter" fastdns_verify
+        : > "$FASTDNS_MARK"
+        echo ""
+        local col="$G"; line_top "$col"
+        crow "$col" "${W}${BOLD}⚡ FAST DNS ON (via filter)${NC}"; line_mid "$col"
+        row "$col" "${GR}Upstream${NC}  ${W}${FASTDNS_PRIMARY} · ${FASTDNS_FALLBACK}${NC}"
+        row "$col" "${GR}Managed by${NC} ${W}content filter (dnsmasq)${NC}"
+        line_bot "$col"; pause; return
+    fi
+
+    # back up current resolver once, then apply
+    [ -f "$FASTDNS_BAK" ] || cp -f /etc/resolv.conf "$FASTDNS_BAK" 2>/dev/null
+    fastdns_step "Selecting fastest resolvers" sleep 0.5
+    fastdns_step "Applying upstream resolver" fastdns_write_resolv
+
+    if ! fastdns_step "Verifying live resolution" fastdns_verify; then
+        # never leave DNS broken — roll back immediately
+        [ -f "$FASTDNS_BAK" ] && cp -f "$FASTDNS_BAK" /etc/resolv.conf 2>/dev/null
+        echo ""
+        err "Verification failed — restored the previous resolver. No change made."
+        pause; return
+    fi
+    : > "$FASTDNS_MARK"
+    echo ""
+    local col="$G"; line_top "$col"
+    crow "$col" "${W}${BOLD}⚡ FAST DNS ACTIVATED${NC}"; line_mid "$col"
+    row "$col" "${GR}Primary${NC}   ${W}${FASTDNS_PRIMARY}${NC}  ${GR}(Cloudflare)${NC}"
+    row "$col" "${GR}Fallback${NC}  ${W}${FASTDNS_FALLBACK}${NC}  ${GR}(Google)${NC}"
+    row "$col" "${GR}Applies to${NC} ${W}all traffic exiting the SlowDNS tunnel${NC}"
+    line_bot "$col"
+    echo -e "\n  ${GR}SlowDNS lookups now resolve through the fastest path.${NC}"
     pause
+}
+
+fastdns_revert() {
+    section "FAST DNS — REVERT" "$ORANGE"
+    if ! fastdns_active; then
+        note "Fast DNS is not active — nothing to revert."; pause; return
+    fi
+    if fastdns_filter_owns; then
+        rm -f "$FASTDNS_MARK"
+        ok "Content filter still manages DNS — fast-DNS marker cleared."
+        pause; return
+    fi
+    fastdns_step "Restoring previous resolver" bash -c '[ -f "'"$FASTDNS_BAK"'" ] && cp -f "'"$FASTDNS_BAK"'" /etc/resolv.conf'
+    fastdns_step "Verifying live resolution" fastdns_verify || true
+    rm -f "$FASTDNS_MARK" "$FASTDNS_BAK"
+    echo ""
+    ok "Reverted to the previous resolver."
+    pause
+}
+
+fastdns_menu() {
+    while true; do
+        section "FAST DNS (SLOWDNS BOOSTER)" "$TEAL"
+        local st
+        if fastdns_active; then st="${G}● active${NC}"; else st="${GR}○ off${NC}"; fi
+        echo -e "  ${GR}Status${NC} : $st\n"
+        menu_item "1" "🚀" "Activate fast DNS"   "$G"
+        menu_item "2" "↩ " "Revert to default"   "$ORANGE"
+        menu_item "0" "↩ " "Back to main menu"   "$GR"
+        echo ""
+        read -rp "$(echo -e "  ${TEAL}❯${NC} select an option : ")" fo
+        case "$fo" in
+            1) fastdns_apply ;;
+            2) fastdns_revert ;;
+            0) return ;;
+            *) err "Invalid option."; sleep 1 ;;
+        esac
+    done
 }
 
 abuse_menu() {
@@ -3182,9 +3419,10 @@ while true; do
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
-    menu_item "11" "🐌" "SlowDNS info"            "$PINK"
+    menu_item "11" "🐌" "SlowDNS info / repair"   "$PINK"
     menu_item "12" "🛡 " "Abuse protection"        "$LIME"
     menu_item "13" "⚡" "UDP (Hysteria) high-speed" "$SKY"
+    menu_item "14" "🚀" "Activate fast DNS"        "$TEAL"
     menu_item "0" "🚪" "Exit"                     "$GR"
     echo ""
     read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
@@ -3202,6 +3440,7 @@ while true; do
         11) slowdns_info ;;
         12) abuse_menu ;;
         13) hysteria_menu ;;
+        14) fastdns_menu ;;
         0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
