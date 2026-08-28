@@ -92,12 +92,8 @@ install_server() {
     *) die "Unsupported operating system: ${PRETTY_NAME:-unknown}" ;;
   esac
 
-  local port="${SSHCC_PORT:-22}"
-  if [[ -t 0 ]]; then
-    read -r -p "  SSH port [22]: " input_port
-    port="${input_port:-22}"
-  fi
-  validate_port "$port" || die "Port must be between 1 and 65535."
+  # Keep the same default SSH endpoint as the original installer.
+  local port="22"
 
   note "Updating package indexes"
   export DEBIAN_FRONTEND=noninteractive
@@ -265,6 +261,17 @@ service_status() {
   printf "  %-18s %s\n" "Load" "$(cut -d' ' -f1-3 /proc/loadavg)"
 }
 
+bandwidth_status() {
+  banner
+  printf "  %bBANDWIDTH%b\n\n" "$WHITE$BOLD" "$RESET"
+  if command_exists vnstat; then
+    vnstat --oneline 2>/dev/null || vnstat 2>/dev/null || true
+  else
+    printf "  vnstat is not installed; showing interface counters instead.\n\n"
+    ip -s link 2>/dev/null | sed -n '1,80p' || true
+  fi
+}
+
 pause() {
   printf "\n"
   read -r -p "  Press Enter to continue..." _
@@ -285,7 +292,8 @@ menu() {
     printf "  %b6%b  Change password\n" "$BLUE" "$RESET"
     printf "  %b7%b  Renew account\n" "$GREEN" "$RESET"
     printf "  %b8%b  Server status\n" "$CYAN" "$RESET"
-    printf "  %b9%b  Restart OpenSSH\n" "$YELLOW" "$RESET"
+    printf "  %b9%b  Bandwidth usage\n" "$BLUE" "$RESET"
+    printf "  %b10%b Restart OpenSSH\n" "$YELLOW" "$RESET"
     printf "  %b0%b  Exit\n\n" "$GRAY" "$RESET"
     read -r -p "  Select an option: " option
     case "$option" in
@@ -297,7 +305,8 @@ menu() {
       6) change_password; pause ;;
       7) renew_user; pause ;;
       8) service_status; pause ;;
-      9) restart_ssh; ok "OpenSSH restarted."; pause ;;
+      9) bandwidth_status; pause ;;
+      10) restart_ssh; ok "OpenSSH restarted."; pause ;;
       0) clear; exit 0 ;;
       *) sleep 1 ;;
     esac
@@ -306,17 +315,18 @@ menu() {
 
 case "${1:-}" in
   install) install_server ;;
-  menu|"") menu ;;
+  menu) menu ;;
+  "") install_server ;;
   --help|-h)
     cat <<EOF
 $APP_NAME
 
 Usage:
+  sudo bash $0           Install and secure an OpenSSH-only server
   sudo bash $0 install   Install and secure an OpenSSH-only server
   sudo sshcc             Open the account management console
 
-Environment:
-  SSHCC_PORT=2222        Set a non-interactive installation port
+The SSH service remains on TCP port 22, matching the original installer.
 EOF
     ;;
   *) die "Unknown command '$1'. Use --help." ;;
