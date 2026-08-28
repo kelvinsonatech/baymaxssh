@@ -4,11 +4,39 @@ An OpenSSH-only VPS installer and account manager. It intentionally contains no
 V2Ray, Xray, VMess, VLESS, Trojan, Hysteria, SlowDNS, WireGuard, OpenVPN,
 WebSocket proxy, TLS tunnel, or Dropbear services.
 
+This is a new installer. It does not replace or modify the older
+`ssh-ssl-setup.sh` script.
+
 ## Install
 
 Test on a fresh Debian 11/12 or Ubuntu 20.04/22.04/24.04 VPS with an active
 root shell. Keep your current SSH session open until you confirm a second login
 works.
+
+### Direct install from GitHub
+
+The hosted copy is available at:
+
+`https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh`
+
+Download it before running so the installer can install its `sshcc` command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh \
+  -o /tmp/ssh-command-center.sh
+chmod +x /tmp/ssh-command-center.sh
+sudo /tmp/ssh-command-center.sh install
+```
+
+To install on a custom SSH port without an interactive prompt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh \
+  -o /tmp/ssh-command-center.sh
+sudo SSHCC_PORT=2222 /tmp/ssh-command-center.sh install
+```
+
+### Local install
 
 ```bash
 chmod +x ssh-command-center.sh
