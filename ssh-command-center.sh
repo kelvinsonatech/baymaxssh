@@ -8,6 +8,8 @@ readonly APP_NAME="SSH Command Center"
 readonly APP_DIR="/etc/ssh-command-center"
 readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/90-ssh-command-center.conf"
 readonly MENU_BIN="/usr/local/bin/sshcc"
+readonly COMPAT_MENU_BIN="/usr/local/bin/menu"
+readonly SCRIPT_URL="https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh"
 
 RED='\033[38;5;203m'
 GREEN='\033[38;5;84m'
@@ -77,7 +79,26 @@ EOF
 }
 
 write_menu() {
-  install -m 0755 "$0" "$MENU_BIN"
+  local source="${BASH_SOURCE[0]:-}"
+  if [[ -f "$source" && "$source" != "bash" && "$source" != "/bin/bash" ]]; then
+    install -m 0755 "$source" "$MENU_BIN"
+    install -m 0755 "$source" "$COMPAT_MENU_BIN"
+    return
+  fi
+
+  # `bash -c "$(curl ...)"` has no source file to copy. Keep the same
+  # one-command install pattern by making the menu lazily fetch this
+  # same named installer when it is opened.
+  local menu_wrapper
+  menu_wrapper="$(mktemp)"
+  cat > "$menu_wrapper" <<EOF
+#!/usr/bin/env bash
+set -e
+exec bash -c "\$(curl -fsSL '${SCRIPT_URL}?v=\$(date +%s)')" @ menu
+EOF
+  install -m 0755 "$menu_wrapper" "$MENU_BIN"
+  install -m 0755 "$menu_wrapper" "$COMPAT_MENU_BIN"
+  rm -f "$menu_wrapper"
 }
 
 install_server() {
