@@ -28,25 +28,11 @@ chmod +x /tmp/ssh-command-center.sh
 sudo /tmp/ssh-command-center.sh install
 ```
 
-To install on a custom SSH port without an interactive prompt:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh \
-  -o /tmp/ssh-command-center.sh
-sudo SSHCC_PORT=2222 /tmp/ssh-command-center.sh install
-```
-
 ### Local install
 
 ```bash
 chmod +x ssh-command-center.sh
 sudo ./ssh-command-center.sh install
-```
-
-For unattended installation on a custom port:
-
-```bash
-sudo SSHCC_PORT=2222 ./ssh-command-center.sh install
 ```
 
 After installation, open the management console:
@@ -56,7 +42,7 @@ sudo sshcc
 ```
 
 The console manages SSH accounts, expiry dates, passwords, active sessions,
-disconnects, service status, and OpenSSH restarts.
+disconnects, service status, bandwidth counters, and OpenSSH restarts.
 
 ## Security defaults
 
