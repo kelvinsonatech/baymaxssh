@@ -13,13 +13,14 @@ starts, fails to bind, and keeps restarting with no obvious error to the user.
 reference installer) but the tunnel never came up — the missing step was freeing
 port 53, which neither the reference nor the first attempt did.
 
-**How to apply:** disable only systemd-resolved's stub listener; never use a
-broad `fuser -k 53/udp`, because that can kill the intentional dnsmasq content
-filter. If dnsmasq is active, bind dnstt to the server's locally assigned public
-IP on UDP 53 so dnsmasq can retain loopback:53; otherwise dnstt may bind `:53`.
-After restart, verify `systemctl is-active`, open only UDP 53 in ufw, and restore
-the previous unit transactionally if repair fails. Client needs the NS domain,
-server.pub key, a public DNS resolver, and a normal SSH account.
+**How to apply:** before starting slowdns, disable resolved's stub listener
+(`/etc/systemd/resolved.conf.d/*.conf` -> `[Resolve]\nDNSStubListener=no`),
+rewrite `/etc/resolv.conf` to a real resolver (1.1.1.1/8.8.8.8) so name
+resolution still works, `fuser -k 53/udp`, then restart resolved. After
+`systemctl restart slowdns`, verify with `systemctl is-active` and surface a
+warning pointing at `journalctl -u slowdns` if it's not active. Also open
+UDP 53 in ufw. Client needs: NS domain, server.pub key, a public DNS resolver,
+and a normal SSH account (SlowDNS just tunnels to 127.0.0.1:22).
 
 **Do not let SlowDNS abort the installer.** The main script runs `set -e`. The
 SlowDNS phase has unguarded fail-prone commands (apt, `git clone` bamsoftware,

@@ -1757,19 +1757,7 @@ if [ -n "$NS_DOMAIN" ]; then
         printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
         systemctl restart systemd-resolved >/dev/null 2>&1
     fi
-
-    # Never kill arbitrary UDP/53 owners: dnsmasq may be the enabled content
-    # filter. When it owns loopback:53, bind dnstt only to the server's local
-    # public address so both services coexist. Otherwise dnstt may use :53.
-    SLOWDNS_BIND=":53"
-    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
-        if [ -n "$SERVER_IP" ] && ip -o addr show 2>/dev/null | grep -qw "$SERVER_IP"; then
-            SLOWDNS_BIND="${SERVER_IP}:53"
-        else
-            warn "SlowDNS cannot safely share UDP 53 with dnsmasq — public IP is not local"
-            SLOWDNS_BIND=""
-        fi
-    fi
+    fuser -k 53/udp >/dev/null 2>&1   # anything else squatting on :53
 
     # --- Build dnstt-server. dnstt needs a modern Go (>=1.21); apt often ships
     #     one too old (Debian 11=1.15, 12=1.19), so we try the toolchain on PATH
@@ -1811,7 +1799,7 @@ if [ -n "$NS_DOMAIN" ]; then
         fi
     fi
 
-    if [ -x /usr/local/bin/dnstt-server ] && [ -n "$SLOWDNS_BIND" ]; then
+    if [ -x /usr/local/bin/dnstt-server ]; then
         mkdir -p /etc/slowdns
         # generate the server keypair once; reuse on re-runs
         if [ ! -s /etc/slowdns/server.key ] || [ ! -s /etc/slowdns/server.pub ]; then
@@ -1828,7 +1816,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/slowdns
-ExecStart=/usr/local/bin/dnstt-server -udp ${SLOWDNS_BIND} -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
 Restart=always
 RestartSec=3
 
@@ -2863,71 +2851,6 @@ xray_menu() {
     done
 }
 
-slowdns_repair() {
-    local ns bind old_unit rc=0
-    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
-    [ -n "$ns" ] && [ -x /usr/local/bin/dnstt-server ] || return 1
-    [ -s /etc/slowdns/server.key ] || return 1
-
-    # Free only systemd-resolved's local stub. Never kill arbitrary port-53
-    # processes because dnsmasq may be intentionally filtering DNS.
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        mkdir -p /etc/systemd/resolved.conf.d
-        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
-        systemctl restart systemd-resolved >/dev/null 2>&1
-    fi
-
-    bind=":53"
-    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
-        if [ -n "$SERVER_IP" ] && ip -o addr show 2>/dev/null | grep -qw "$SERVER_IP"; then
-            bind="${SERVER_IP}:53"
-        else
-            return 2
-        fi
-    fi
-
-    old_unit=$(mktemp)
-    [ -f /etc/systemd/system/slowdns.service ] \
-        && cp -f /etc/systemd/system/slowdns.service "$old_unit"
-    cat > /etc/systemd/system/slowdns.service <<EOF
-[Unit]
-Description=SlowDNS (dnstt) Tunnel Server
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/slowdns
-ExecStart=/usr/local/bin/dnstt-server -udp ${bind} -privkey-file /etc/slowdns/server.key ${ns} 127.0.0.1:22
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl enable slowdns >/dev/null 2>&1
-    systemctl restart slowdns >/dev/null 2>&1
-    sleep 2
-    systemctl is-active --quiet slowdns 2>/dev/null || rc=1
-
-    # Open only SlowDNS's UDP port. No TCP or other protocol rule is changed.
-    if [ $rc -eq 0 ] && command -v ufw >/dev/null 2>&1; then
-        ufw allow 53/udp >/dev/null 2>&1
-    fi
-
-    if [ $rc -ne 0 ]; then
-        # Transaction safety: restore the exact previous unit if repair failed.
-        if [ -s "$old_unit" ]; then
-            cp -f "$old_unit" /etc/systemd/system/slowdns.service
-            systemctl daemon-reload >/dev/null 2>&1
-            systemctl restart slowdns >/dev/null 2>&1
-        fi
-    fi
-    rm -f "$old_unit"
-    return $rc
-}
-
 slowdns_info() {
     section "SLOWDNS (DNSTT)" "$PINK"
     local col="$PINK"
@@ -2953,24 +2876,7 @@ slowdns_info() {
     echo ""
     echo -e "  ${GR}Client: use NS '${W}${ns}${GR}', the public key above, and any${NC}"
     echo -e "  ${GR}SlowDNS-capable app (SSH account = your normal users).${NC}"
-    echo ""
-    menu_item "1" "🛠 " "Repair / restart SlowDNS" "$G"
-    menu_item "0" "↩ " "Back to main menu"        "$GR"
-    echo ""
-    read -rp "$(echo -e "  ${PINK}❯${NC} select an option : ")" sdopt
-    case "$sdopt" in
-        1)
-            echo ""
-            if fastdns_step "Repairing SlowDNS UDP 53 safely" slowdns_repair; then
-                ok "SlowDNS is running. No other protocol was changed."
-            else
-                err "Repair failed safely; the previous service was restored."
-                warn "Check the NS record and run: journalctl -u slowdns -n 30"
-            fi
-            pause
-            ;;
-        *) return ;;
-    esac
+    pause
 }
 
 # ── FAST DNS (SlowDNS upstream-resolver booster) ──────────
@@ -3419,7 +3325,7 @@ while true; do
     menu_item "8" "📶" "Bandwidth usage"          "$SKY"
     menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
     menu_item "10" "🔄" "Restart all services"    "$Y"
-    menu_item "11" "🐌" "SlowDNS info / repair"   "$PINK"
+    menu_item "11" "🐌" "SlowDNS info"            "$PINK"
     menu_item "12" "🛡 " "Abuse protection"        "$LIME"
     menu_item "13" "⚡" "UDP (Hysteria) high-speed" "$SKY"
     menu_item "14" "🚀" "Activate fast DNS"        "$TEAL"
