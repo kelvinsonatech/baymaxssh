@@ -19,13 +19,17 @@ The hosted copy is available at:
 
 `https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh`
 
-Download it before running so the installer can install its `sshcc` command:
+Run it using the same compact pattern as the original installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh \
-  -o /tmp/ssh-command-center.sh
-chmod +x /tmp/ssh-command-center.sh
-sudo /tmp/ssh-command-center.sh install
+sudo bash -c "$(curl -fsSL "https://raw.githubusercontent.com/kelvinsonatech/myssh/replit-agent/ssh-command-center.sh?v=$(date +%s)")" @ install
+```
+
+After installation, use either the new name or the compatible menu command:
+
+```bash
+sudo sshcc
+sudo menu
 ```
 
 ### Local install
