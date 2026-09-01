@@ -30,6 +30,7 @@ BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
 BOLD='\033[1m'; DIM='\033[2m'
 TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; LIME='\033[38;5;155m'; CORAL='\033[38;5;209m'
 GRY='\033[38;5;240m'; BWHITE='\033[97m'; PINK='\033[38;5;213m'; ORANGE='\033[38;5;208m'
+BAYMAX_IMAGE_URL="https://raw.githubusercontent.com/kelvinsonatech/baymaxssh/main/assets/baymaxssh-reference.png"
 export LANG=C.UTF-8 LC_ALL=C.UTF-8 2>/dev/null || true
 
 # During the phased install, info/success are silenced so the single animated
@@ -85,6 +86,15 @@ phase() {  # phase "Title"
     fi
 }
 
+show_baymax_image() {
+    local image="$1"
+    [ -r "$image" ] || return 0
+    command -v chafa >/dev/null 2>&1 || return 0
+    echo -e "  ${GRY}visual reference${NC}"
+    chafa --format symbols --colors 8 --size "42x12" "$image" 2>/dev/null || true
+    echo ""
+}
+
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
 
 CONF_DIR=/etc/ssh-panel
@@ -129,7 +139,13 @@ echo ""
 read -rp "$(echo -e "   ${PINK}❯${NC} ${BWHITE}NS domain${NC} ${GRY}(blank = skip)${NC} : ")" NS_DOMAIN
 NS_DOMAIN="$(echo "$NS_DOMAIN" | tr -d '[:space:]')"
 
-apt-get install -y curl >/dev/null 2>&1 || true
+apt-get install -y curl chafa >/dev/null 2>&1 || true
+BAYMAX_IMAGE_DIR=/usr/local/share/baymaxssh
+BAYMAX_IMAGE_FILE="$BAYMAX_IMAGE_DIR/baymaxssh-reference.png"
+mkdir -p "$BAYMAX_IMAGE_DIR"
+curl -fsSL --connect-timeout 10 --max-time 30 "$BAYMAX_IMAGE_URL" \
+    -o "$BAYMAX_IMAGE_FILE" 2>/dev/null || rm -f "$BAYMAX_IMAGE_FILE"
+show_baymax_image "$BAYMAX_IMAGE_FILE"
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
@@ -178,7 +194,8 @@ apt-get update -y </dev/null >/dev/null 2>&1
 # SECTION 1 — OPENSSH
 # ═══════════════════════════════════════════
 phase "OpenSSH server"
-eval "$APT openssh-server curl" </dev/null >/dev/null 2>&1
+eval "$APT openssh-server curl chafa" </dev/null >/dev/null 2>&1
+show_baymax_image "$BAYMAX_IMAGE_FILE"
 
 SSHD_CONF=/etc/ssh/sshd_config
 [ ! -f "${SSHD_CONF}.orig" ] && cp "$SSHD_CONF" "${SSHD_CONF}.orig"
@@ -2099,6 +2116,7 @@ CONF_DIR=/etc/ssh-panel
 DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
 SERVER_IP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
 HOST_DISPLAY="${DOMAIN:-$SERVER_IP}"
+BAYMAX_IMAGE_FILE=/usr/local/share/baymaxssh/baymaxssh-reference.png
 
 [[ $EUID -ne 0 ]] && { echo -e "${R}Run as root: sudo menu${NC}"; exit 1; }
 
@@ -2204,6 +2222,9 @@ bw_period() { case "$1" in d) bw_scope day;; *) bw_scope month;; esac; }
 
 banner() {
     clear
+    if command -v chafa >/dev/null 2>&1 && [ -r "$BAYMAX_IMAGE_FILE" ]; then
+        chafa --format symbols --colors 8 --size "42x12" "$BAYMAX_IMAGE_FILE" 2>/dev/null || true
+    fi
     echo ""
     echo -e "  ${CORAL}╭──────╮${NC}   ${W}${BOLD}baymax${CORAL}ssh${NC}"
     echo -e "  ${CORAL}│${W}  •  • ${CORAL}│${NC}   ${GR}friendly server setup${NC}"

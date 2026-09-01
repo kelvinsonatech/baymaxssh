@@ -168,7 +168,7 @@ export function BaymaxSSHInstaller() {
 
         <aside className="space-y-5">
           <div className="relative min-h-[250px] overflow-hidden rounded-2xl border border-[#415052] bg-[#202f32] shadow-[0_20px_60px_rgba(0,0,0,.2)]">
-            <img src="/__mockup/images/baymaxssh-reference.jpg" alt="Baymax and his armored companion, used as the BaymaxSSH visual reference" className="absolute inset-0 h-full w-full object-cover object-[57%_44%] opacity-75" />
+            <img src="/__mockup/images/baymaxssh-reference.png" alt="Baymax and his armored companion, used as the BaymaxSSH visual reference" className="absolute inset-0 h-full w-full object-cover object-[57%_44%] opacity-75" />
             <div className="absolute inset-0 bg-gradient-to-t from-[#0f2023] via-[#102326]/25 to-transparent" />
             <div className="relative flex min-h-[250px] flex-col justify-between p-5">
               <div className="flex items-center justify-between"><span className="rounded-full border border-white/20 bg-[#112326]/60 px-2.5 py-1 font-mono text-[9px] uppercase tracking-[.12em] text-[#dce6dc] backdrop-blur">visual reference / 01</span><span className="flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[.12em] text-[#b7d1c2]"><span className="h-1.5 w-1.5 rounded-full bg-[#69cf94]" /> calm mode</span></div>
