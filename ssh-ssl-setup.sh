@@ -19,7 +19,8 @@
 #
 # Usage:
 #   chmod +x ssh-ssl-setup.sh
-#   sudo ./ssh-ssl-setup.sh
+#   sudo VPN_DOMAIN=vpn.example.com ./ssh-ssl-setup.sh
+#   sudo ./ssh-ssl-setup.sh vpn.example.com
 # =============================================================
 
 set -e
@@ -108,22 +109,32 @@ echo -e "  ${CORAL}│${BWHITE}  •  • ${CORAL}│${NC}   ${GRY}friendly serv
 echo -e "  ${CORAL}╰─┬──┬─╯${NC}   ${GRY}secure tunnels · clear controls${NC}"
 echo -e "  ${CORAL}  ╰──╯${NC}     ${BWHITE}${BOLD}script installer${NC}"
 echo ""
-printf '\033[?25h'   # restore cursor for the prompt
+printf '\033[?25h'   # restore cursor after the intro animation
 
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-DOMAIN=""
+SERVER_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk 'NF' | sort -u)
+[ -n "$SERVER_IP" ] && printf '%s\n' "$SERVER_IP" | cat - <(printf '%s\n' "$SERVER_IPS") | awk 'NF && !seen[$0]++' > "$CONF_DIR/ip-list.conf"
+SERVER_IPS=$(cat "$CONF_DIR/ip-list.conf" 2>/dev/null | paste -sd ', ' -)
+DOMAIN="${1:-${VPN_DOMAIN:-}}"
+DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '[:space:]')"
+DOMAIN_IPS=""
+if [ -n "$DOMAIN" ] && getent ahostsv4 "$DOMAIN" >/dev/null 2>&1; then
+    DOMAIN_IPS=$(getent ahostsv4 "$DOMAIN" | awk '{print $1}' | sort -u | paste -sd ', ' -)
+fi
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
+printf '%s\n' "$DOMAIN_IPS" > "$CONF_DIR/domain-ips.conf"
 
 # ── system info panel ──
 _OS=$( (. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME") || echo "Linux" )
 echo ""
 echo -e "  ${GRY}┌─ ${BWHITE}${BOLD}SYSTEM${NC} ${GRY}────────────────────────────────────────────┐${NC}"
-printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Server IP" "$SERVER_IP"
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Server IPs" "${SERVER_IPS:-$SERVER_IP}"
 printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "OS" "$_OS"
 if [ -n "$DOMAIN" ]; then
     printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${LIME}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "domain: $DOMAIN"
+    [ -n "$DOMAIN_IPS" ] && printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "DNS IPs" "$DOMAIN_IPS"
 else
     printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "self-signed (connect by IP)"
 fi
