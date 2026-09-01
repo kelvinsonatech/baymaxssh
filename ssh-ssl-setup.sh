@@ -50,6 +50,7 @@ _PH_T0=$SECONDS; _PH_NAME=""
 _TW=$(tput cols 2>/dev/null || echo 72); [ "$_TW" -gt 80 ] && _TW=80; [ "$_TW" -lt 48 ] && _TW=48
 # 6-stop cool→warm gradient used to colour the meter as it fills
 _MG=('\033[38;5;45m' '\033[38;5;44m' '\033[38;5;44m' '\033[38;5;48m' '\033[38;5;83m' '\033[38;5;155m')
+_PULSE=('.' 'o' 'O' 'o')
 
 _meter() {  # _meter PCT  -> gradient-filled slim bar
     local pct="$1" bw=22 fl em i seg gi out=""
@@ -71,13 +72,21 @@ _seal() {
         "$INSTALL_STEP" "$INSTALL_TOTAL" "$_PH_NAME" "$d"
 }
 
+_phase_line() {
+    local marker="$1" pct="$2"
+    printf "\r\033[K ${GRY}[${BWHITE}%02d${GRY}/%02d]${NC} ${SKY}%s${NC} ${BWHITE}${BOLD}%-18.18s${NC} %b ${TEAL}${BOLD}%3d%%${NC}" \
+        "$INSTALL_STEP" "$INSTALL_TOTAL" "$marker" "$_PH_NAME" "$(_meter "$pct")" "$pct"
+}
+
 phase() {  # phase "Title"
     _seal
     INSTALL_STEP=$(( INSTALL_STEP + 1 )); _PH_NAME="$1"; _PH_T0=$SECONDS
-    local pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL ))
-    # live "in progress" row for the current phase
-    printf "\r\033[K ${GRY}[${BWHITE}%02d${GRY}/%02d]${NC} ${SKY}▸${NC} ${BWHITE}${BOLD}%-18.18s${NC} %b ${TEAL}${BOLD}%3d%%${NC}" \
-        "$INSTALL_STEP" "$INSTALL_TOTAL" "$1" "$(_meter "$pct")" "$pct"
+    local pct=$(( INSTALL_STEP * 100 / INSTALL_TOTAL )) i
+    # A tiny pulse gives each phase a clear handoff without adding noise.
+    for i in 0 1 2 3; do
+        _phase_line "${_PULSE[$i]}" "$pct"
+        [ -t 1 ] && sleep 0.06
+    done
     if [ "$INSTALL_STEP" -ge "$INSTALL_TOTAL" ]; then
         _seal; _PH_NAME=""
         local tot=$(( SECONDS - INSTALL_T0 ))
