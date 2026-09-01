@@ -28,7 +28,7 @@ BGreen='\033[1;32m'; BYellow='\033[1;33m'; BCyan='\033[1;36m'
 BRed='\033[1;31m'; BPurple='\033[1;35m'; NC='\033[0m'
 # extended palette for the advanced installer UI
 BOLD='\033[1m'; DIM='\033[2m'
-TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; LIME='\033[38;5;155m'
+TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; LIME='\033[38;5;155m'; CORAL='\033[38;5;209m'
 GRY='\033[38;5;240m'; BWHITE='\033[97m'; PINK='\033[38;5;213m'; ORANGE='\033[38;5;208m'
 export LANG=C.UTF-8 LC_ALL=C.UTF-8 2>/dev/null || true
 
@@ -96,34 +96,24 @@ STUNNEL_CERT=/etc/stunnel/stunnel.pem
 # ═══════════════════════════════════════════
 clear
 printf '\033[?25l'   # hide cursor for the intro animation
-# gradient ASCII banner, revealed line-by-line
-_banner=(
-"    ███████╗███████╗██╗  ██╗    ██╗   ██╗██████╗ ███╗   ██╗"
-"    ██╔════╝██╔════╝██║  ██║    ██║   ██║██╔══██╗████╗  ██║"
-"    ███████╗███████╗███████║    ██║   ██║██████╔╝██╔██╗ ██║"
-"    ╚════██║╚════██║██╔══██║    ╚██╗ ██╔╝██╔═══╝ ██║╚██╗██║"
-"    ███████║███████║██║  ██║     ╚████╔╝ ██║     ██║ ╚████║"
-"    ╚══════╝╚══════╝╚═╝  ╚═╝      ╚═══╝  ╚═╝     ╚═╝  ╚═══╝"
-)
-_grad=('\033[38;5;201m' '\033[38;5;165m' '\033[38;5;39m' '\033[38;5;51m' '\033[38;5;46m' '\033[38;5;226m')
 echo ""
-for i in "${!_banner[@]}"; do
-    echo -e "  ${_grad[$i]}${BOLD}${_banner[$i]}${NC}"
-done
-echo -e "         ${GRY}ws${NC} ${DIM}·${NC} ${GRY}ssl${NC} ${DIM}·${NC} ${GRY}openssh${NC} ${DIM}·${NC} ${GRY}dropbear${NC} ${DIM}·${NC} ${GRY}v2ray${NC}   ${BWHITE}${BOLD}server installer${NC}"
+echo -e "  ${CORAL}╭──────╮${NC}   ${BWHITE}${BOLD}baymax${CORAL}ssh${NC}"
+echo -e "  ${CORAL}│${BWHITE}  •  • ${CORAL}│${NC}   ${GRY}friendly server setup${NC}"
+echo -e "  ${CORAL}╰─┬──┬─╯${NC}   ${GRY}secure tunnels · clear controls${NC}"
+echo -e "  ${CORAL}  ╰──╯${NC}     ${BWHITE}${BOLD}script installer${NC}"
 echo ""
 printf '\033[?25h'   # restore cursor for the prompt
 
 # ── styled domain prompt ──
-echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
-echo -e "  ${TEAL}│${NC}  ${BWHITE}${BOLD}DOMAIN SETUP${NC}                                        ${TEAL}│${NC}"
-echo -e "  ${TEAL}├──────────────────────────────────────────────────────┤${NC}"
-echo -e "  ${TEAL}│${NC}  ${GRY}Enter a domain pointed at this server, or leave${NC}     ${TEAL}│${NC}"
-echo -e "  ${TEAL}│${NC}  ${GRY}blank to use a self-signed certificate (connect${NC}     ${TEAL}│${NC}"
-echo -e "  ${TEAL}│${NC}  ${GRY}by IP).${NC}                                              ${TEAL}│${NC}"
-echo -e "  ${TEAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo -e "  ${CORAL}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${CORAL}│${NC}  ${BWHITE}${BOLD}TARGET SERVER${NC}                                       ${CORAL}│${NC}"
+echo -e "  ${CORAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${CORAL}│${NC}  ${GRY}Enter a domain pointed at this server, or leave${NC}     ${CORAL}│${NC}"
+echo -e "  ${CORAL}│${NC}  ${GRY}blank to use a self-signed certificate (connect${NC}     ${CORAL}│${NC}"
+echo -e "  ${CORAL}│${NC}  ${GRY}by IP).${NC}                                              ${CORAL}│${NC}"
+echo -e "  ${CORAL}╰──────────────────────────────────────────────────────╯${NC}"
 echo ""
-read -rp "$(echo -e "   ${SKY}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
+read -rp "$(echo -e "   ${CORAL}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
 DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
 echo ""
 
@@ -162,7 +152,7 @@ fi
 printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Steps" "$INSTALL_TOTAL install phases"
 echo -e "  ${GRY}└──────────────────────────────────────────────────────┘${NC}"
 echo ""
-echo -e "  ${TEAL}${BOLD}▸ Installing${NC}${GRY} — automated, no input needed.${NC}"
+echo -e "  ${CORAL}${BOLD}▸${NC} ${BWHITE}${BOLD}baymaxssh${NC} ${GRY}is preparing your server — automated, no input needed.${NC}"
 echo ""
 UI_SILENT=1   # from here on, the checklist HUD is the only output
 
@@ -2100,7 +2090,7 @@ B='\033[1;34m'; P='\033[1;35m'; C='\033[1;36m'; W='\033[1;37m'
 GR='\033[0;90m'
 # 256-colour accents
 TEAL='\033[38;5;44m'; ORANGE='\033[38;5;208m'; PINK='\033[38;5;213m'
-LIME='\033[38;5;118m'; SKY='\033[38;5;39m'; VIOLET='\033[38;5;99m'
+LIME='\033[38;5;118m'; SKY='\033[38;5;39m'; VIOLET='\033[38;5;99m'; CORAL='\033[38;5;209m'
 
 # Keep legacy names working
 BGreen="$G"; BYellow="$Y"; BCyan="$C"; BRed="$R"; BPurple="$P"
@@ -2215,20 +2205,17 @@ bw_period() { case "$1" in d) bw_scope day;; *) bw_scope month;; esac; }
 banner() {
     clear
     echo ""
-    echo -e "   ${TEAL} ██████╗ ██████╗ ${SKY}██╗   ██╗${PINK}██████╗ ███╗   ██╗${NC}"
-    echo -e "   ${TEAL}██╔════╝██╔════╝ ${SKY}██║   ██║${PINK}██╔══██╗████╗  ██║${NC}"
-    echo -e "   ${TEAL}╚█████╗ ╚█████╗  ${SKY}███████║${PINK}██████╔╝██╔██╗ ██║${NC}"
-    echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
-    echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
-    echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
-    echo -e "        ${GR}ws · ssl · dropbear · openssh manager${NC}"
+    echo -e "  ${CORAL}╭──────╮${NC}   ${W}${BOLD}baymax${CORAL}ssh${NC}"
+    echo -e "  ${CORAL}│${W}  •  • ${CORAL}│${NC}   ${GR}friendly server setup${NC}"
+    echo -e "  ${CORAL}╰─┬──┬─╯${NC}   ${GR}secure tunnels · clear controls${NC}"
+    echo -e "  ${CORAL}  ╰──╯${NC}     ${W}${BOLD}script control console${NC}"
     echo ""
 }
 
 status_bar() {
-    local col="$P" s dot
+    local col="$CORAL" s dot
     line_top "$col"
-    crow "$col" "${W}${BOLD}SSH VPN CONTROL PANEL${NC}"
+    crow "$col" "${W}${BOLD}BAYMAXSSH CONTROL CONSOLE${NC}"
     line_mid "$col"
     row "$col" "${GR}HOST${NC}    ${Y}${HOST_DISPLAY}${NC}"
     row "$col" "${GR}USERS${NC}   ${C}$(count_users)${NC} total   ${LIME}$(count_online)${NC} online"
@@ -3308,30 +3295,42 @@ hysteria_menu() {
 }
 
 menu_item() {  # menu_item NUM ICON "Label" color
-    echo -e "  ${4}${BOLD}$1${NC} ${GR}│${NC} ${4}$2${NC}  ${W}$3${NC}"
+    printf "  %b%2s%b ${GR}│${NC} %b%-3s%b %b%s%b\\n" "$4" "$1" "$NC" "$4" "$2" "$NC" "$W" "$3" "$NC"
+}
+
+menu_group() {
+    echo -e "  ${GR}── ${DIM}$1${NC}"
 }
 
 while true; do
     banner
     status_bar
     echo ""
-    menu_item "1" "➕" "Create SSH user"          "$LIME"
-    menu_item "2" "🗑 " "Delete SSH user"          "$R"
-    menu_item "3" "📋" "List all users"           "$SKY"
-    menu_item "4" "🟢" "Show online users"        "$G"
-    menu_item "5" "🔑" "Change user password"     "$ORANGE"
-    menu_item "6" "♻️ " "Renew / extend account"   "$VIOLET"
-    menu_item "7" "📊" "Service status"           "$C"
-    menu_item "8" "📶" "Bandwidth usage"          "$SKY"
-    menu_item "9" "🌐" "Xray / V2Ray (VMess)"     "$PINK"
-    menu_item "10" "🔄" "Restart all services"    "$Y"
-    menu_item "11" "🐌" "SlowDNS info"            "$PINK"
-    menu_item "12" "🛡 " "Abuse protection"        "$LIME"
-    menu_item "13" "⚡" "UDP (Hysteria) high-speed" "$SKY"
-    menu_item "14" "🚀" "Activate fast DNS"        "$TEAL"
-    menu_item "0" "🚪" "Exit"                     "$GR"
+    menu_group "ACCOUNT ACCESS"
+    menu_item "1" "+" "Create SSH user"             "$LIME"
+    menu_item "2" "x" "Delete SSH user"             "$R"
+    menu_item "3" "#" "List all users"              "$SKY"
+    menu_item "4" "o" "Show online users"           "$G"
+    menu_item "5" "*" "Change user password"        "$ORANGE"
+    menu_item "6" "+" "Renew / extend account"      "$VIOLET"
     echo ""
-    read -rp "$(echo -e "  ${P}❯${NC} select an option : ")" OPT
+    menu_group "SERVICE MONITORING"
+    menu_item "7" "@" "Service status"              "$C"
+    menu_item "8" "~" "Bandwidth usage"             "$SKY"
+    menu_item "10" ">" "Restart all services"       "$Y"
+    echo ""
+    menu_group "TUNNELS & PROTECTION"
+    menu_item "9" "#" "Xray / V2Ray (VMess)"        "$PINK"
+    menu_item "11" "~" "SlowDNS info"               "$PINK"
+    menu_item "12" "+" "Abuse protection"           "$LIME"
+    menu_item "13" ">" "UDP (Hysteria) high-speed"  "$SKY"
+    menu_item "14" ">" "Activate fast DNS"          "$TEAL"
+    echo ""
+    menu_group "SESSION"
+    menu_item "0" "<" "Exit"                        "$GR"
+    echo ""
+    echo -e "  ${GR}baymaxssh · select a number · Ctrl+C to quit${NC}"
+    read -rp "$(echo -e "  ${CORAL}❯${NC} select an option : ")" OPT
     case "$OPT" in
         1) create_user ;;
         2) delete_user ;;
@@ -3347,7 +3346,7 @@ while true; do
         12) abuse_menu ;;
         13) hysteria_menu ;;
         14) fastdns_menu ;;
-        0) clear; echo -e "  ${G}Goodbye 👋${NC}\n"; exit 0 ;;
+        0) clear; echo -e "  ${CORAL}Goodbye from baymaxssh.${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
 done
@@ -3371,7 +3370,7 @@ cat > /etc/update-motd.d/00-litronx <<'MOTDEOF'
 #!/bin/bash
 # Branded login watermark for the SSH-VPN server.
 NC='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
-TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINK='\033[38;5;213m'
+TEAL='\033[38;5;44m'; SKY='\033[38;5;39m'; PINK='\033[38;5;213m'; CORAL='\033[38;5;209m'
 LIME='\033[38;5;155m'; GRY='\033[38;5;240m'; W='\033[97m'; Y='\033[1;33m'; G='\033[1;32m'; R='\033[1;31m'
 CONF_DIR=/etc/ssh-panel
 DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
@@ -3387,13 +3386,10 @@ for s in ssh dropbear ws-proxy stunnel4 xray dnsmasq; do
     if systemctl is-active --quiet "$s" 2>/dev/null; then svc+=" ${G}●${NC}${GRY}${s}${NC}"; else svc+=" ${R}○${NC}${GRY}${s}${NC}"; fi
 done
 echo ""
-echo -e "   ${TEAL} ██████╗ ██████╗ ${SKY}██╗   ██╗${PINK}██████╗ ███╗   ██╗${NC}"
-echo -e "   ${TEAL}██╔════╝██╔════╝ ${SKY}██║   ██║${PINK}██╔══██╗████╗  ██║${NC}"
-echo -e "   ${TEAL}╚█████╗ ╚█████╗  ${SKY}███████║${PINK}██████╔╝██╔██╗ ██║${NC}"
-echo -e "   ${TEAL} ╚═══██╗ ╚═══██╗ ${SKY}██╔══██║${PINK}██╔═══╝ ██║╚██╗██║${NC}"
-echo -e "   ${TEAL}██████╔╝██████╔╝ ${SKY}██║  ██║${PINK}██║     ██║ ╚████║${NC}"
-echo -e "   ${TEAL}╚═════╝ ╚═════╝  ${SKY}╚═╝  ╚═╝${PINK}╚═╝     ╚═╝  ╚═══╝${NC}"
-echo -e "        ${GRY}ws · ssl · openssh · dropbear · v2ray  ${W}${BOLD}VPN SERVER${NC}"
+echo -e "  ${CORAL}╭──────╮${NC}   ${W}${BOLD}baymax${CORAL}ssh${NC}"
+echo -e "  ${CORAL}│${W}  •  • ${CORAL}│${NC}   ${GRY}friendly server setup${NC}"
+echo -e "  ${CORAL}╰─┬──┬─╯${NC}   ${GRY}secure tunnels · clear controls${NC}"
+echo -e "  ${CORAL}  ╰──╯${NC}     ${W}${BOLD}VPN SERVER${NC}"
 echo ""
 echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
 printf "  ${TEAL}│${NC}  ${GRY}HOST${NC}    ${W}${BOLD}%-44s${NC}${TEAL}│${NC}\n" "$HOST_DISPLAY"
@@ -3438,7 +3434,7 @@ UI_SILENT=0
 _ELAPSED=$(( SECONDS - INSTALL_T0 ))
 clear
 echo ""
-echo -e "  ${LIME}${BOLD}  ✔  INSTALLATION COMPLETE${NC}   ${GRY}all protocols installed in ${BWHITE}${_ELAPSED}s${GRY}.${NC}"
+echo -e "  ${CORAL}${BOLD}  ✔  BAYMAXSSH INSTALLATION COMPLETE${NC}   ${GRY}all protocols installed in ${BWHITE}${_ELAPSED}s${GRY}.${NC}"
 echo ""
 echo -e "  ${TEAL}╭──────────────────────────────────────────────────────╮${NC}"
 printf  "  ${TEAL}│${NC}  ${SKY}◆${NC} %-13s ${BWHITE}${BOLD}%-33.33s${NC}${TEAL}│${NC}\n" "Host / Domain" "${DOMAIN:-$SERVER_IP}"
