@@ -85,35 +85,6 @@ phase() {  # phase "Title"
     fi
 }
 
-baymax_art() {
-    local tw="${_TW:-${COLS:-72}}"
-    if [ "$tw" -lt 62 ]; then
-        echo -e "  ${CORAL}       ▄████████████▄${NC}"
-        echo -e "  ${CORAL}    ▄████${ORANGE}██████${CORAL}████▄${NC}"
-        echo -e "  ${CORAL}  ▄███${ORANGE}  ▄██  ██▄  ${CORAL}███▄${NC}"
-        echo -e "  ${CORAL} █████${ORANGE}██████████${CORAL}█████${NC}"
-        echo -e "  ${BWHITE} ▄█${GRY}● ●${BWHITE}█▄${NC} ${CORAL}████${PINK}███${CORAL}████${PINK}███${CORAL}███${NC}"
-        echo -e "  ${BWHITE}██████${NC} ${CORAL}████████████████${NC}"
-        echo -e "  ${BWHITE} █████${NC}  ${CORAL}███████████████${NC}"
-        echo -e "  ${BWHITE}  ███${NC}    ${CORAL}▀███████████▀${NC}"
-        echo -e "  ${BWHITE} ▀██▀${NC}"
-        return
-    fi
-    echo -e "  ${CORAL}          ▄██████████████▄${NC}"
-    echo -e "  ${CORAL}       ▄████${ORANGE}████████${CORAL}████▄${NC}"
-    echo -e "  ${CORAL}     ▄███${ORANGE}  ▄██████▄  ${CORAL}███▄${NC}"
-    echo -e "  ${CORAL}   ▄████${ORANGE}  ●      ●  ${CORAL}████▄${NC}"
-    echo -e "  ${CORAL}  █████${ORANGE}██████████████${CORAL}█████${NC}"
-    echo -e "  ${CORAL} ████████████████████████████${NC}"
-    echo -e "  ${CORAL}██████${PINK}█████${CORAL}████████${PINK}█████${CORAL}██████${NC}"
-    echo -e "  ${BWHITE}  ▄█${GRY}●  ●${BWHITE}█▄${NC} ${CORAL}████████████████████${NC}"
-    echo -e "  ${BWHITE} ██████${NC} ${CORAL}█████████████████████${NC}"
-    echo -e "  ${BWHITE}████████${NC} ${CORAL}████████████████████${NC}"
-    echo -e "  ${BWHITE} ██████${NC}  ${CORAL}▀████████████████▀${NC}"
-    echo -e "  ${BWHITE}  ████${NC}"
-    echo -e "  ${BWHITE} ▀██▀${NC}"
-}
-
 [[ $EUID -ne 0 ]] && error "This script must be run as root."
 
 CONF_DIR=/etc/ssh-panel
@@ -126,9 +97,10 @@ STUNNEL_CERT=/etc/stunnel/stunnel.pem
 clear
 printf '\033[?25l'   # hide cursor for the intro animation
 echo ""
-baymax_art
-echo -e "  ${BWHITE}${BOLD}baymax${CORAL}ssh${NC}  ${GRY}armored setup · gentle control${NC}"
-echo -e "  ${GRY}secure tunnels · clear controls · protocol-safe installer${NC}"
+echo -e "  ${CORAL}╭──────╮${NC}   ${BWHITE}${BOLD}baymax${CORAL}ssh${NC}"
+echo -e "  ${CORAL}│${BWHITE}  •  • ${CORAL}│${NC}   ${GRY}friendly server setup${NC}"
+echo -e "  ${CORAL}╰─┬──┬─╯${NC}   ${GRY}secure tunnels · clear controls${NC}"
+echo -e "  ${CORAL}  ╰──╯${NC}     ${BWHITE}${BOLD}script installer${NC}"
 echo ""
 printf '\033[?25h'   # restore cursor for the prompt
 
@@ -2230,41 +2202,13 @@ bw_alltime() { bw_scope all; }
 # Prints "rx tx total" in bytes for a period label: d (today) or m (month).
 bw_period() { case "$1" in d) bw_scope day;; *) bw_scope month;; esac; }
 
-baymax_art() {
-    local tw="${COLS:-72}"
-    if [ "$tw" -lt 62 ]; then
-        echo -e "  ${CORAL}       ▄████████████▄${NC}"
-        echo -e "  ${CORAL}    ▄████${ORANGE}██████${CORAL}████▄${NC}"
-        echo -e "  ${CORAL}  ▄███${ORANGE}  ▄██  ██▄  ${CORAL}███▄${NC}"
-        echo -e "  ${CORAL} █████${ORANGE}██████████${CORAL}█████${NC}"
-        echo -e "  ${W} ▄█${GR}● ●${W}█▄${NC} ${CORAL}████${PINK}███${CORAL}████${PINK}███${CORAL}███${NC}"
-        echo -e "  ${W}██████${NC} ${CORAL}████████████████${NC}"
-        echo -e "  ${W} █████${NC}  ${CORAL}███████████████${NC}"
-        echo -e "  ${W}  ███${NC}    ${CORAL}▀███████████▀${NC}"
-        echo -e "  ${W} ▀██▀${NC}"
-        return
-    fi
-    echo -e "  ${CORAL}          ▄██████████████▄${NC}"
-    echo -e "  ${CORAL}       ▄████${ORANGE}████████${CORAL}████▄${NC}"
-    echo -e "  ${CORAL}     ▄███${ORANGE}  ▄██████▄  ${CORAL}███▄${NC}"
-    echo -e "  ${CORAL}   ▄████${ORANGE}  ●      ●  ${CORAL}████▄${NC}"
-    echo -e "  ${CORAL}  █████${ORANGE}██████████████${CORAL}█████${NC}"
-    echo -e "  ${CORAL} ████████████████████████████${NC}"
-    echo -e "  ${CORAL}██████${PINK}█████${CORAL}████████${PINK}█████${CORAL}██████${NC}"
-    echo -e "  ${W}  ▄█${GR}●  ●${W}█▄${NC} ${CORAL}████████████████████${NC}"
-    echo -e "  ${W} ██████${NC} ${CORAL}█████████████████████${NC}"
-    echo -e "  ${W}████████${NC} ${CORAL}████████████████████${NC}"
-    echo -e "  ${W} ██████${NC}  ${CORAL}▀████████████████▀${NC}"
-    echo -e "  ${W}  ████${NC}"
-    echo -e "  ${W} ▀██▀${NC}"
-}
-
 banner() {
     clear
     echo ""
-    baymax_art
-    echo -e "  ${W}${BOLD}baymax${CORAL}ssh${NC}  ${GR}armored setup · gentle control${NC}"
-    echo -e "  ${GR}secure tunnels · clear controls · protocol-safe console${NC}"
+    echo -e "  ${CORAL}╭──────╮${NC}   ${W}${BOLD}baymax${CORAL}ssh${NC}"
+    echo -e "  ${CORAL}│${W}  •  • ${CORAL}│${NC}   ${GR}friendly server setup${NC}"
+    echo -e "  ${CORAL}╰─┬──┬─╯${NC}   ${GR}secure tunnels · clear controls${NC}"
+    echo -e "  ${CORAL}  ╰──╯${NC}     ${W}${BOLD}script control console${NC}"
     echo ""
 }
 
