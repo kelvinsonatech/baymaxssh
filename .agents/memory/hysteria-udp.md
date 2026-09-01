@@ -34,7 +34,7 @@ iptables becomes "command not found" (same lesson as abuse-guard); installer
 also apt-installs iptables if absent.
 
 **Why it can't break other protocols:** all rules are UDP-only. Every other
-protocol (SSH/SSL/WS/V2Ray) is TCP; SlowDNS is UDP 53, outside 20000-50000. The
+protocol (SSH/SSL/WS/V2Ray) is TCP. The
 REDIRECT lives in nat/PREROUTING (ingress), separate from abuse-guard's egress
 OUTPUT chain. Rules apply/cleanup via the unit's ExecStartPre/ExecStopPost so
 they persist across reboot and vanish on deactivate.
