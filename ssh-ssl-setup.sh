@@ -194,7 +194,8 @@ apt-get update -y </dev/null >/dev/null 2>&1
 # SECTION 1 — OPENSSH
 # ═══════════════════════════════════════════
 phase "OpenSSH server"
-eval "$APT openssh-server curl" </dev/null >/dev/null 2>&1
+eval "$APT openssh-server curl chafa" </dev/null >/dev/null 2>&1
+show_baymax_image "$BAYMAX_IMAGE_FILE"
 
 SSHD_CONF=/etc/ssh/sshd_config
 [ ! -f "${SSHD_CONF}.orig" ] && cp "$SSHD_CONF" "${SSHD_CONF}.orig"
