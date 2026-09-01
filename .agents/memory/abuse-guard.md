@@ -26,7 +26,7 @@ setup the operator already relied on.
 server-side-only choice after bypass tests): redirect all port-53 lookups into
 dnsmasq via BOTH nat OUTPUT (server-side proxies: sshd/xray/ws-proxy) AND nat
 PREROUTING (forwarded/TUN clients). PREROUTING must RETURN on
-`-m addrtype --dst-type LOCAL` FIRST or it hijacks SlowDNS inbound on PUBIP:53.
+`-m addrtype --dst-type LOCAL` FIRST so traffic for the server itself is untouched.
 PREROUTING→loopback REDIRECT needs `sysctl net.ipv4.conf.all.route_localnet=1`.
 OUTPUT must owner-exempt the dnsmasq uid (`id -u dnsmasq`) or upstream queries
 loop. Block DoT(853), DoH(443+QUIC to known resolver IPs) on OUTPUT+FORWARD;
@@ -39,13 +39,6 @@ site still opens after `test` PASSes, the client isn't routing DNS/web through
 the server. Fallback `nameserver 1.1.1.1` so DNS
 survives if dnsmasq dies; blocked domains answer 0.0.0.0 instantly so no
 fallthrough. Restore resolv.conf FIRST in teardown.
-
-**SlowDNS coexistence on :53 must be transaction-safe.** dnstt binds 0.0.0.0:53;
-to free loopback:53 for dnsmasq, rebind dnstt to `${PUBIP}:53` — but only after
-verifying PUBIP is actually a local address (`ip -o addr | grep -w`), else skip
-the filter. Always restore the original unit and verify slowdns is-active on any
-failure; warn loudly if it doesn't come back. See slowdns-udp53.md for the base
-:53 constraint.
 
 **Self-test enforcement lesson:** the self-test can show dnsmasq working while
 the iptables enforcement rules (OUTPUT port-53 redirect, DoH/DoT blocks) are
@@ -108,5 +101,5 @@ CBEOF comment-free anyway, and after any curated-list change verify
 **VPN-infra immunity:** never block tcp/443 to well-known resolver IPs —
 HTTP Custom / injector configs use 1.1.1.1 / 8.8.8.8 etc. as bug-host/proxy
 SNI on 443, so those DoH blocks clip the user's own tunnel. Keep DoT(853) blocks ONLY — no 443 blocking in any form (tcp or udp/QUIC); port-53 redirect stays the primary
-enforcement. Blocklist build strips the server's own domain, NS domain, and
-admin allowlist so feeds can never blackhole the tunnel's own hosts.
+enforcement. Blocklist build strips the server's own domain and admin allowlist
+so feeds can never blackhole the tunnel's own hosts.
