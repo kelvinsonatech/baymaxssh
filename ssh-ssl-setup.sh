@@ -3472,7 +3472,7 @@ done
 for H in /root/.bash_history "$HOME/.bash_history" /root/.zsh_history "$HOME/.zsh_history" \
          /root/.ash_history "$HOME/.ash_history" /root/.local/share/fish/fish_history; do
     [ -f "$H" ] || continue
-    sed -i -E '/(ssh-ssl-setup\.sh|raw\.githubusercontent\.com\/kelvinsonatech\/myssh)/d' "$H" 2>/dev/null
+    sed -i -E '/(ssh-ssl-setup\.sh|raw\.githubusercontent\.com\/kelvinsonatech\/baymaxssh)/d' "$H" 2>/dev/null
 done
 # 3) Drop the current session's in-memory history so it can't be flushed back.
 history -c 2>/dev/null || true

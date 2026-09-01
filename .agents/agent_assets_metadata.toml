@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "wWDiihPkHOkKs7OoUgnya"
+uri = "file://scripts/ssh-ssl-setup.sh"
+type = "unspecified"
+title = "baymaxssh VPN installer"
+description = "The organized SSH, WebSocket, SSL, Xray, SlowDNS, Hysteria, and management-panel installer published to GitHub."
+logical_id = "2e0e5222-ac48-4085-af9c-d3dea3394211"
+content_hash = "sha256:3170137178d594aa207da10d3a56083390d4be08a95965e50946b47ece97a146"
+size = 152405
+mtime_ms = 1788281863899
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/repl:55400f87-2566-403e-804b-053527f71b26/2e0e5222-ac48-4085-af9c-d3dea3394211/0248981c-8b36-4801-9659-da17423f1f40"
+storage_version_token = "1788281889281548"
+content_type = "application/octet-stream"
