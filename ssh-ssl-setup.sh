@@ -100,9 +100,6 @@ CONF_DIR=/etc/ssh-panel
 mkdir -p "$CONF_DIR"
 STUNNEL_CERT=/etc/stunnel/stunnel.pem
 
-# ═══════════════════════════════════════════
-# ASK FOR DOMAIN
-# ═══════════════════════════════════════════
 clear
 printf '\033[?25l'   # hide cursor for the intro animation
 echo ""
@@ -113,21 +110,9 @@ echo -e "  ${CORAL}  ╰──╯${NC}     ${BWHITE}${BOLD}script installer${NC}
 echo ""
 printf '\033[?25h'   # restore cursor for the prompt
 
-# ── styled domain prompt ──
-echo -e "  ${CORAL}╭──────────────────────────────────────────────────────╮${NC}"
-echo -e "  ${CORAL}│${NC}  ${BWHITE}${BOLD}TARGET SERVER${NC}                                       ${CORAL}│${NC}"
-echo -e "  ${CORAL}├──────────────────────────────────────────────────────┤${NC}"
-echo -e "  ${CORAL}│${NC}  ${GRY}Enter a domain pointed at this server, or leave${NC}     ${CORAL}│${NC}"
-echo -e "  ${CORAL}│${NC}  ${GRY}blank to use a self-signed certificate (connect${NC}     ${CORAL}│${NC}"
-echo -e "  ${CORAL}│${NC}  ${GRY}by IP).${NC}                                              ${CORAL}│${NC}"
-echo -e "  ${CORAL}╰──────────────────────────────────────────────────────╯${NC}"
-echo ""
-read -rp "$(echo -e "   ${CORAL}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
-DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
-echo ""
-
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+DOMAIN=""
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
 
