@@ -5,7 +5,7 @@
 # Working payload/SSL layout (HTTP Injector / HTTP Custom style):
 #
 #   80   — WebSocket / SSH proxy  (payload -> 101 -> SSH)
-#   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (SSL payload)
+#   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (manual SSL payload)
 #   447  — SSL/TLS  (stunnel) -> OpenSSH direct
 #   22   — OpenSSH  (management / direct)
 #   109  — Dropbear (direct)
@@ -100,6 +100,7 @@ phase() {  # phase "Title"
 CONF_DIR=/etc/ssh-panel
 mkdir -p "$CONF_DIR"
 STUNNEL_CERT=/etc/stunnel/stunnel.pem
+SSL_PAYLOAD_FLAG="$CONF_DIR/ssl-payload"
 
 clear
 printf '\033[?25l'   # hide cursor for the intro animation
@@ -578,11 +579,12 @@ systemctl start ws-proxy >/dev/null 2>&1 || true
 
 # ═══════════════════════════════════════════
 # SECTION 5 — STUNNEL (SSL / TLS)
-#   443 -> WebSocket proxy (SSL + payload)
+#   443 -> WebSocket proxy (SSL + payload), manually enabled from menu
 #   447 -> OpenSSH direct  (plain SSL)
 # ═══════════════════════════════════════════
 phase "Stunnel TLS"
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || true
+rm -f "$SSL_PAYLOAD_FLAG"
 
 cat > /etc/stunnel/stunnel.conf <<EOF
 pid     = /var/run/stunnel4.pid
@@ -593,11 +595,6 @@ socket  = l:TCP_NODELAY=1
 socket  = r:TCP_NODELAY=1
 TIMEOUTclose = 0
 
-; SSL + WebSocket payload: TLS on 443 -> dual-mode proxy on 80 -> SSH
-[ssl-ws]
-accept  = 443
-connect = 127.0.0.1:80
-
 ; Plain SSL to OpenSSH: TLS on 447 -> OpenSSH 22
 [ssl-ssh]
 accept  = 447
@@ -606,7 +603,7 @@ EOF
 
 systemctl enable stunnel4 >/dev/null 2>&1 || true
 systemctl restart stunnel4 >/dev/null 2>&1
-success "Stunnel running — SSL 443 (payload) & 447 (direct SSH)"
+success "Stunnel running — SSL payload 443 is off; direct SSL 447 is active"
 
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
@@ -2087,7 +2084,11 @@ show_ports() {
     crow "$col" "${W}${BOLD}CONNECTION PORTS${NC}"
     line_mid "$col"
     row "$col" "${LIME}▸${NC} WebSocket (payload)  ${GR}→${NC} ${W}${HOST_DISPLAY}:80${NC}"
-    row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443${NC}"
+    if [ -f "$SSL_PAYLOAD_FLAG" ]; then
+        row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443 ${G}(on)${NC}"
+    else
+        row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443 ${R}(off)${NC}"
+    fi
     row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
     row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
     row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
@@ -2299,6 +2300,68 @@ restart_services() {
     pause
 }
 
+ssl_payload_menu() {
+    section "SSL PAYLOAD — PORT 443" "$ORANGE"
+    local owner; owner=$(cat "$XP443F" 2>/dev/null)
+    line_top "$ORANGE"
+    if [ -n "$owner" ]; then
+        row "$ORANGE" "${GR}STATUS${NC}  ${P}443 is being used by V2Ray (${owner}).${NC}"
+        row "$ORANGE" "${Y}Use Xray / V2Ray option 6 to return 443 to SSL payload.${NC}"
+        line_bot "$ORANGE"
+        pause
+        return
+    fi
+
+    if [ -f "$SSL_PAYLOAD_FLAG" ]; then
+        row "$ORANGE" "${GR}STATUS${NC}  ${G}enabled${NC}"
+        row "$ORANGE" "${GR}ROUTE${NC}   ${W}443 → SSL → WebSocket → SSH${NC}"
+        line_bot "$ORANGE"; echo ""
+        read -rp "$(echo -e "  ${C}Disable SSL payload on 443?${NC} ${GR}(y/N)${NC} : ")" answer
+        if [[ "$answer" =~ ^[Yy] ]]; then
+            rm -f "$SSL_PAYLOAD_FLAG"
+            write_stunnel_conf no
+            systemctl restart stunnel4 >/dev/null 2>&1
+            sleep 1
+            if ss -ltn 2>/dev/null | grep -q ':443 '; then
+                printf 'on\n' > "$SSL_PAYLOAD_FLAG"
+                write_stunnel_conf yes
+                systemctl restart stunnel4 >/dev/null 2>&1
+                err "Port 443 could not be released; SSL payload remains enabled."
+            else
+                ok "SSL payload disabled. Plain WebSocket on port 80 is unchanged."
+            fi
+        else
+            note "No change."
+        fi
+    else
+        row "$ORANGE" "${GR}STATUS${NC}  ${R}disabled${NC}"
+        row "$ORANGE" "${GR}ROUTE${NC}   ${W}443 is available for manual activation${NC}"
+        line_bot "$ORANGE"; echo ""
+        read -rp "$(echo -e "  ${C}Enable SSL payload on 443?${NC} ${GR}(y/N)${NC} : ")" answer
+        if [[ "$answer" =~ ^[Yy] ]]; then
+            if [ ! -s "$STCERT" ]; then
+                err "SSL certificate is missing; cannot enable SSL payload."
+            else
+                printf 'on\n' > "$SSL_PAYLOAD_FLAG"
+                write_stunnel_conf yes
+                systemctl restart stunnel4 >/dev/null 2>&1
+                sleep 1
+                if ss -ltn 2>/dev/null | grep -q ':443 '; then
+                    ok "SSL payload enabled: 443 → WebSocket → SSH."
+                else
+                    rm -f "$SSL_PAYLOAD_FLAG"
+                    write_stunnel_conf no
+                    systemctl restart stunnel4 >/dev/null 2>&1
+                    err "SSL payload could not bind port 443; it was left disabled."
+                fi
+            fi
+        else
+            note "No change."
+        fi
+    fi
+    pause
+}
+
 # ═══════════════════════════════════════════
 # XRAY / V2RAY (VMESS) — menu-activated, not auto-started
 # ═══════════════════════════════════════════
@@ -2315,6 +2378,7 @@ TR_WS_TLS=2083; TR_WS_NONE=8080; TR_HTTP_NONE=2082; TR_HTTP_TLS=2087; TR_SPLIT_T
 XP443F=/etc/xray/port443
 STCONF=/etc/stunnel/stunnel.conf
 STCERT=/etc/stunnel/stunnel.pem
+SSL_PAYLOAD_FLAG="$CONF_DIR/ssl-payload"
 
 xray_paths() {
     mkdir -p /etc/xray /usr/local/etc/xray
@@ -2374,14 +2438,17 @@ xray_443() {
     if [ -n "$cur" ]; then
         row "$col" "${GR}443 NOW${NC}  ${P}V2Ray — ${cur} (WS-TLS)${NC}"
         row "$col" "${GR}SSL PAYLOAD${NC} ${R}disabled${NC}"
-    else
+    elif [ -f "$SSL_PAYLOAD_FLAG" ]; then
         row "$col" "${GR}443 NOW${NC}  ${G}SSL payload SSH${NC}"
+    else
+        row "$col" "${GR}443 NOW${NC}  ${Y}disabled (enable from main menu)${NC}"
     fi
     line_bot "$col"; echo ""
     if [ -n "$cur" ]; then
         read -rp "$(echo -e "  ${C}Restore SSL-payload SSH on 443?${NC} ${GR}(y/N)${NC} : ")" a
         if [[ "$a" =~ ^[Yy] ]]; then
             rm -f "$XP443F"
+            printf 'on\n' > "$SSL_PAYLOAD_FLAG"
             # Order matters: Xray must RELEASE 443 before stunnel can bind it.
             rebuild_config; systemctl restart xray >/dev/null 2>&1
             sleep 1
@@ -2403,8 +2470,13 @@ xray_443() {
         line_top "$wcol"
         crow "$wcol" "${Y}${BOLD}⚠  WARNING${NC}"
         line_mid "$wcol"
-        row "$wcol" "${W}This disables SSL-payload SSH on port 443.${NC}"
-        row "$wcol" "${GR}443 SSH users stop working · 80/109/143/447 stay up${NC}"
+        if [ -f "$SSL_PAYLOAD_FLAG" ]; then
+            row "$wcol" "${W}This disables SSL-payload SSH on port 443.${NC}"
+            row "$wcol" "${GR}443 SSH users stop working · 80/109/143/447 stay up${NC}"
+        else
+            row "$wcol" "${W}SSL-payload SSH is already disabled on port 443.${NC}"
+            row "$wcol" "${GR}Choosing V2Ray will assign port 443 to its WS-TLS listener.${NC}"
+        fi
         line_bot "$wcol"
         echo ""
         echo -e "  ${C}${BOLD}Give 443 to which V2Ray protocol?${NC}"
@@ -2418,6 +2490,7 @@ xray_443() {
         local proto=""
         case "$pc" in 1) proto=vmess;; 2) proto=vless;; 3) proto=trojan;; *) note "Cancelled."; pause; return;; esac
         if ! xray_install; then err "Xray must be installed first — create an account."; pause; return; fi
+        rm -f "$SSL_PAYLOAD_FLAG"
         echo "$proto" > "$XP443F"
         # Xray usually runs as a non-root user; 443 is a privileged port.
         # Grant CAP_NET_BIND_SERVICE via a systemd drop-in (idempotent).
@@ -2443,6 +2516,7 @@ DROPEOF
             note "Rolling back — 443 returns to SSL-payload SSH."
             rm -f "$XP443F"; rebuild_config
             systemctl restart xray >/dev/null 2>&1
+            printf 'on\n' > "$SSL_PAYLOAD_FLAG"
             write_stunnel_conf yes; systemctl restart stunnel4 >/dev/null 2>&1
         fi
     fi
@@ -2669,7 +2743,13 @@ xray_menu() {
         row "$col" "${GR}STATUS${NC}  ${st}"
         row "$col" "${GR}HOST${NC}    ${Y}${XHOST}${NC}"
         row "$col" "${GR}ACCTS${NC}   ${C}$(grep -c '|' "$XACC" 2>/dev/null | grep . || echo 0)${NC}"
-        if [ -n "$p443" ]; then row "$col" "${GR}PORT443${NC} ${P}V2Ray (${p443})${NC}"; else row "$col" "${GR}PORT443${NC} ${G}SSL payload SSH${NC}"; fi
+        if [ -n "$p443" ]; then
+            row "$col" "${GR}PORT443${NC} ${P}V2Ray (${p443})${NC}"
+        elif [ -f "$SSL_PAYLOAD_FLAG" ]; then
+            row "$col" "${GR}PORT443${NC} ${G}SSL payload SSH${NC}"
+        else
+            row "$col" "${GR}PORT443${NC} ${Y}disabled${NC}"
+        fi
         line_bot "$col"
         echo ""
         menu_item "1" "⚡" "Create account (VMess/VLESS/Trojan)" "$LIME"
@@ -3009,6 +3089,7 @@ while true; do
     menu_item "9" "#" "Xray / V2Ray (VMess)"        "$PINK"
     menu_item "12" "+" "Abuse protection"           "$LIME"
     menu_item "13" ">" "UDP (Hysteria) high-speed"  "$SKY"
+    menu_item "14" "S" "Switch SSL payload on/off"  "$ORANGE"
     echo ""
     menu_group "SESSION"
     menu_item "0" "<" "Exit"                        "$GR"
@@ -3029,6 +3110,7 @@ while true; do
         10) restart_services ;;
         12) abuse_menu ;;
         13) hysteria_menu ;;
+        14) ssl_payload_menu ;;
         0) clear; echo -e "  ${CORAL}Goodbye from baymaxssh.${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
@@ -3123,7 +3205,7 @@ echo -e "  ${TEAL}╭───────────────────�
 printf  "  ${TEAL}│${NC}  ${SKY}◆${NC} %-13s ${BWHITE}${BOLD}%-33.33s${NC}${TEAL}│${NC}\n" "Host / Domain" "${DOMAIN:-$SERVER_IP}"
 echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}SERVICES & PORTS${NC} ${TEAL}──────────────────────────────────┤${NC}"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "WebSocket (payload)" "80"
-printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL + payload (TLS)" "443"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL + payload (TLS)" "443 (manual)"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL direct SSH (TLS)" "447"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "OpenSSH" "22"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "Dropbear" "109, 143"
@@ -3134,6 +3216,7 @@ echo ""
 echo -e "  ${GRY}Client tips${NC}"
 echo -e "    ${DIM}WS payload${NC}  GET / HTTP/1.1[crlf]Host: ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}[crlf]Upgrade: websocket[crlf][crlf]"
 echo -e "    ${DIM}SSL/SNI${NC}     ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
+echo -e "    ${DIM}SSL payload${NC}  ${BWHITE}off by default — enable with menu option 14${NC}"
 echo ""
 echo -e "  ${TEAL}${BOLD}▸${NC} Type ${LIME}${BOLD}menu${NC} to open the control panel and create users."
 echo ""
