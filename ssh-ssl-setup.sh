@@ -2238,6 +2238,25 @@ change_password() {
     pause
 }
 
+change_root_password() {
+    section "CHANGE SERVER (ROOT) PASSWORD" "$R"
+    row "$R" "${Y}This changes the root/SSH login password for THIS server.${NC}"
+    echo ""
+    read -rsp "$(echo -e "  ${C}New root password${NC} : ")" RPASS
+    echo ""
+    [ -z "$RPASS" ] && { err "Password cannot be empty."; pause; return; }
+    read -rsp "$(echo -e "  ${C}Confirm password${NC}  : ")" RPASS2
+    echo ""
+    [ "$RPASS" != "$RPASS2" ] && { err "Passwords do not match."; pause; return; }
+    if printf '%s\n%s\n' "$RPASS" "$RPASS" | passwd root >/dev/null 2>&1; then
+        ok "Root password updated. Use it on your next SSH login."
+    else
+        err "Failed to change root password."
+    fi
+    unset RPASS RPASS2
+    pause
+}
+
 renew_user() {
     section "RENEW / EXTEND ACCOUNT" "$VIOLET"
     read -rp "$(echo -e "  ${C}Username${NC} : ")" USERNAME
@@ -2979,6 +2998,7 @@ while true; do
     menu_item "4" "o" "Show online users"           "$G"
     menu_item "5" "*" "Change user password"        "$ORANGE"
     menu_item "6" "+" "Renew / extend account"      "$VIOLET"
+    menu_item "11" "!" "Change server password"     "$R"
     echo ""
     menu_group "SERVICE MONITORING"
     menu_item "7" "@" "Service status"              "$C"
@@ -3002,6 +3022,7 @@ while true; do
         4) online_users ;;
         5) change_password ;;
         6) renew_user ;;
+        11) change_root_password ;;
         7) service_status ;;
         8) bandwidth ;;
         9) xray_menu ;;
