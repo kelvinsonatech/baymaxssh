@@ -9,4 +9,6 @@ description: Durable rules for editing/pushing the standalone SSH/VPN setup scri
 - **Port 443 handover lesson:** Xray runs as non-root; binding 443 needs `AmbientCapabilities=CAP_NET_BIND_SERVICE` drop-in. Always release-then-bind order between stunnel/xray, wait for the port to free, and roll back on failure so users keep 443 SSH.
 - The api-server/mockup-sandbox workflows in this workspace are unrelated to this script — ignore their logs.
 - **`set -e` gotcha:** the installer runs under `set -e`, so a bare `[ cond ] && cmd` as a statement's last line aborts the whole script when the test is false (returns 1). Use `if [ cond ]; then cmd; fi` instead. Bit us in the phase() progress function.
+- **GitHub publishing:** prefer the authenticated GitHub connector for the root installer. A transient repository `404` can clear after probing `/user` and `/repos/kelvinsonatech/baymaxssh`; retry once. `git ls-remote` may work anonymously while `git push` still lacks credentials.
+- **Why:** a readable public remote is not evidence that Git writes are authorized, and switching to direct Git after one connector error adds an avoidable failed path.
 - User wants minimal, tight-scoped changes; open question: suspend (keep UUID) vs delete over-limit Xray accounts.
