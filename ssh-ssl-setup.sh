@@ -5,7 +5,7 @@
 # Working payload/SSL layout (HTTP Injector / HTTP Custom style):
 #
 #   80   — WebSocket / SSH proxy  (payload -> 101 -> SSH)
-#   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (manual SSL payload)
+#   443  — SSL/TLS  (stunnel) -> WebSocket proxy -> SSH   (SSL payload)
 #   447  — SSL/TLS  (stunnel) -> OpenSSH direct
 #   22   — OpenSSH  (management / direct)
 #   109  — Dropbear (direct)
@@ -19,8 +19,7 @@
 #
 # Usage:
 #   chmod +x ssh-ssl-setup.sh
-#   sudo VPN_DOMAIN=vpn.example.com ./ssh-ssl-setup.sh
-#   sudo ./ssh-ssl-setup.sh vpn.example.com
+#   sudo ./ssh-ssl-setup.sh
 # =============================================================
 
 set -e
@@ -100,8 +99,10 @@ phase() {  # phase "Title"
 CONF_DIR=/etc/ssh-panel
 mkdir -p "$CONF_DIR"
 STUNNEL_CERT=/etc/stunnel/stunnel.pem
-SSL_PAYLOAD_FLAG="$CONF_DIR/ssl-payload"
 
+# ═══════════════════════════════════════════
+# ASK FOR DOMAIN
+# ═══════════════════════════════════════════
 clear
 printf '\033[?25l'   # hide cursor for the intro animation
 echo ""
@@ -110,34 +111,52 @@ echo -e "  ${CORAL}│${BWHITE}  •  • ${CORAL}│${NC}   ${GRY}friendly serv
 echo -e "  ${CORAL}╰─┬──┬─╯${NC}   ${GRY}secure tunnels · clear controls${NC}"
 echo -e "  ${CORAL}  ╰──╯${NC}     ${BWHITE}${BOLD}script installer${NC}"
 echo ""
-printf '\033[?25h'   # restore cursor after the intro animation
+printf '\033[?25h'   # restore cursor for the prompt
+
+# ── styled domain prompt ──
+echo -e "  ${CORAL}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${CORAL}│${NC}  ${BWHITE}${BOLD}TARGET SERVER${NC}                                       ${CORAL}│${NC}"
+echo -e "  ${CORAL}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${CORAL}│${NC}  ${GRY}Enter a domain pointed at this server, or leave${NC}     ${CORAL}│${NC}"
+echo -e "  ${CORAL}│${NC}  ${GRY}blank to use a self-signed certificate (connect${NC}     ${CORAL}│${NC}"
+echo -e "  ${CORAL}│${NC}  ${GRY}by IP).${NC}                                              ${CORAL}│${NC}"
+echo -e "  ${CORAL}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+read -rp "$(echo -e "   ${CORAL}❯${NC} ${BWHITE}Domain${NC} ${GRY}(blank = self-signed)${NC} : ")" DOMAIN
+DOMAIN="$(echo "$DOMAIN" | tr -d '[:space:]')"
+echo ""
+
+# ── styled SlowDNS (NS) prompt — optional ──
+echo -e "  ${PINK}╭──────────────────────────────────────────────────────╮${NC}"
+echo -e "  ${PINK}│${NC}  ${BWHITE}${BOLD}SLOWDNS SETUP${NC} ${GRY}(optional)${NC}                          ${PINK}│${NC}"
+echo -e "  ${PINK}├──────────────────────────────────────────────────────┤${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}Enter the NS host delegated to this server's IP${NC}     ${PINK}│${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}(e.g. dns.example.com). Requires an NS + A record${NC}   ${PINK}│${NC}"
+echo -e "  ${PINK}│${NC}  ${GRY}at your DNS host. Leave blank to skip SlowDNS.${NC}      ${PINK}│${NC}"
+echo -e "  ${PINK}╰──────────────────────────────────────────────────────╯${NC}"
+echo ""
+read -rp "$(echo -e "   ${PINK}❯${NC} ${BWHITE}NS domain${NC} ${GRY}(blank = skip)${NC} : ")" NS_DOMAIN
+NS_DOMAIN="$(echo "$NS_DOMAIN" | tr -d '[:space:]')"
 
 apt-get install -y curl >/dev/null 2>&1 || true
 SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-SERVER_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk 'NF' | sort -u)
-[ -n "$SERVER_IP" ] && printf '%s\n' "$SERVER_IP" | cat - <(printf '%s\n' "$SERVER_IPS") | awk 'NF && !seen[$0]++' > "$CONF_DIR/ip-list.conf"
-SERVER_IPS=$(cat "$CONF_DIR/ip-list.conf" 2>/dev/null | paste -sd ', ' -)
-DOMAIN="${1:-${VPN_DOMAIN:-}}"
-DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '[:space:]')"
-DOMAIN_IPS=""
-if [ -n "$DOMAIN" ] && getent ahostsv4 "$DOMAIN" >/dev/null 2>&1; then
-    DOMAIN_IPS=$(getent ahostsv4 "$DOMAIN" | awk '{print $1}' | sort -u | paste -sd ', ' -)
-fi
 echo "$DOMAIN"    > "$CONF_DIR/domain.conf"
 echo "$SERVER_IP" > "$CONF_DIR/ip.conf"
-printf '%s\n' "$DOMAIN_IPS" > "$CONF_DIR/domain-ips.conf"
+echo "$NS_DOMAIN" > "$CONF_DIR/nsdomain.conf"
 
 # ── system info panel ──
 _OS=$( (. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME") || echo "Linux" )
 echo ""
 echo -e "  ${GRY}┌─ ${BWHITE}${BOLD}SYSTEM${NC} ${GRY}────────────────────────────────────────────┐${NC}"
-printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Server IPs" "${SERVER_IPS:-$SERVER_IP}"
+printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Server IP" "$SERVER_IP"
 printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "OS" "$_OS"
 if [ -n "$DOMAIN" ]; then
     printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${LIME}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "domain: $DOMAIN"
-    [ -n "$DOMAIN_IPS" ] && printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "DNS IPs" "$DOMAIN_IPS"
 else
     printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "TLS mode" "self-signed (connect by IP)"
+fi
+if [ -n "$NS_DOMAIN" ]; then
+    printf "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${PINK}%-33.33s${NC}${GRY}│${NC}\n" "SlowDNS" "NS: $NS_DOMAIN"
 fi
 printf  "  ${GRY}│${NC}  ${SKY}◆${NC} %-11s ${BWHITE}%-33.33s${NC}${GRY}│${NC}\n" "Steps" "$INSTALL_TOTAL install phases"
 echo -e "  ${GRY}└──────────────────────────────────────────────────────┘${NC}"
@@ -579,12 +598,11 @@ systemctl start ws-proxy >/dev/null 2>&1 || true
 
 # ═══════════════════════════════════════════
 # SECTION 5 — STUNNEL (SSL / TLS)
-#   443 -> WebSocket proxy (SSL + payload), manually enabled from menu
+#   443 -> WebSocket proxy (SSL + payload)
 #   447 -> OpenSSH direct  (plain SSL)
 # ═══════════════════════════════════════════
 phase "Stunnel TLS"
 sed -i 's/ENABLED=0/ENABLED=1/g' /etc/default/stunnel4 2>/dev/null || true
-rm -f "$SSL_PAYLOAD_FLAG"
 
 cat > /etc/stunnel/stunnel.conf <<EOF
 pid     = /var/run/stunnel4.pid
@@ -595,6 +613,11 @@ socket  = l:TCP_NODELAY=1
 socket  = r:TCP_NODELAY=1
 TIMEOUTclose = 0
 
+; SSL + WebSocket payload: TLS on 443 -> dual-mode proxy on 80 -> SSH
+[ssl-ws]
+accept  = 443
+connect = 127.0.0.1:80
+
 ; Plain SSL to OpenSSH: TLS on 447 -> OpenSSH 22
 [ssl-ssh]
 accept  = 447
@@ -603,7 +626,7 @@ EOF
 
 systemctl enable stunnel4 >/dev/null 2>&1 || true
 systemctl restart stunnel4 >/dev/null 2>&1
-success "Stunnel running — SSL payload 443 is off; direct SSL 447 is active"
+success "Stunnel running — SSL 443 (payload) & 447 (direct SSH)"
 
 # ═══════════════════════════════════════════
 # SECTION 6 — FIREWALL
@@ -613,9 +636,10 @@ if command -v ufw >/dev/null 2>&1; then
     for P in 22 80 109 143 443 447; do
         ufw allow ${P}/tcp >/dev/null 2>&1
     done
+    ufw allow 53/udp >/dev/null 2>&1   # SlowDNS (dnstt) tunnel
     success "UFW rules applied"
 else
-    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447"
+    warn "ufw not found — open TCP ports manually: 22 80 109 143 443 447 + 53/udp"
 fi
 
 # ═══════════════════════════════════════════
@@ -631,7 +655,7 @@ cat > /usr/local/bin/abuse-guard <<'AGEOF'
 #   Modules: brute-force (fail2ban) · egress firewall · torrent block · DNS filter
 # Design: the egress chain RETURNs on ESTABLISHED/RELATED before any rate/port
 # rule, so bulk data is never inspected (zero throughput cost). Everything is
-# reversible and must never leave any protocol broken.
+# reversible and must never leave SlowDNS or any protocol broken.
 set +e
 # iptables/ip6tables/sysctl live in sbin, which is missing from PATH in some
 # shells/menus — that makes every firewall rule silently fail with
@@ -643,6 +667,8 @@ CHAIN=ABUSE_OUT
 CONF_DIR=/etc/ssh-panel
 PUBIP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
 RESOLV_BAK="$ABUSE_DIR/resolv.conf.orig"
+SLOWDNS_UNIT=/etc/systemd/system/slowdns.service
+SLOWDNS_BAK="$ABUSE_DIR/slowdns.service.orig"
 BLOCK_HOSTS="$ABUSE_DIR/blocklist.hosts"
 # Default P2P/DHT/tracker ports (6969 falls inside 6881:6999).
 TORRENT_PORTS="2710,6881:6999,51413"
@@ -724,7 +750,7 @@ apply_dnsforce() {
     iptables -t nat -C OUTPUT -j ABUSE_DNS 2>/dev/null || iptables -t nat -A OUTPUT -j ABUSE_DNS
     # (b) PREROUTING: catches DNS from TUN/route-based tunnels where client
     #     packets are forwarded, not locally generated. Skip anything destined
-    #     to the server itself.
+    #     to the server itself so SlowDNS (dnstt on PUBIP:53) is never hijacked.
     iptables -t nat -N ABUSE_DNSP 2>/dev/null; iptables -t nat -F ABUSE_DNSP
     iptables -t nat -A ABUSE_DNSP -m addrtype --dst-type LOCAL -j RETURN
     iptables -t nat -A ABUSE_DNSP -p udp --dport 53 -j REDIRECT --to-ports 53
@@ -1396,13 +1422,13 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
         fi
     fi
     # Never block the VPN's own infrastructure: the server's configured
-    # domain and any hosts the admin whitelists in
+    # domain, the SlowDNS NS domain, and any hosts the admin whitelists in
     # /etc/ssh-panel/allow.list (one domain per line — bug hosts, CDN/proxy
     # hosts used by client configs like HTTP Custom). Aggregated feeds
     # occasionally contain CDN entries; stripping these here guarantees the
     # filter can never cut the tunnel's own path.
     local wl; wl=$(mktemp)
-    { cat /etc/ssh-panel/domain.conf /etc/ssh-panel/allow.list 2>/dev/null; } \
+    { cat /etc/ssh-panel/domain.conf /etc/ssh-panel/nsdomain.conf /etc/ssh-panel/allow.list 2>/dev/null; } \
         | tr 'A-Z' 'a-z' | grep -E '^[a-z0-9][a-z0-9._-]*\.[a-z][a-z0-9-]*$' | sort -u > "$wl"
     if [ -s "$wl" ] && [ -s "$BLOCK_HOSTS" ]; then
         awk 'NR==FNR { wl[$1]=1; next } !($2 in wl)' "$wl" "$BLOCK_HOSTS" > "${BLOCK_HOSTS}.wl" \
@@ -1415,6 +1441,34 @@ https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydo
     _ensure_doh_block
     _ensure_custom_block
     rm -f "$tmp"
+}
+restore_slowdns() {
+    # Restore the original SlowDNS unit and verify it comes back up. Loud on
+    # failure — SlowDNS must never be left broken by the content filter.
+    [ -f "$SLOWDNS_BAK" ] || return 0
+    cp -f "$SLOWDNS_BAK" "$SLOWDNS_UNIT"; rm -f "$SLOWDNS_BAK"
+    systemctl daemon-reload; systemctl restart slowdns >/dev/null 2>&1; sleep 1
+    systemctl is-active --quiet slowdns 2>/dev/null || echo "  WARNING: SlowDNS did not restart cleanly — check: journalctl -u slowdns"
+}
+free_53_for_dnsmasq() {
+    # If SlowDNS (dnstt) holds 0.0.0.0:53 it blocks dnsmasq on 127.0.0.1:53.
+    # Rebind dnstt to the public IP so loopback:53 frees. Never leave it broken.
+    systemctl is-active --quiet slowdns 2>/dev/null || return 0
+    [ -f "$SLOWDNS_UNIT" ] || return 0
+    grep -q -- "-udp :53" "$SLOWDNS_UNIT" || return 0
+    # PUBIP must be an address actually configured on this host, or dnstt will
+    # fail to bind it. If it isn't local (NAT / floating IP), leave SlowDNS as
+    # is and skip the content filter rather than risk breaking the tunnel.
+    [ -n "$PUBIP" ] || return 1
+    ip -o addr show 2>/dev/null | grep -qw "$PUBIP" || return 1
+    cp -f "$SLOWDNS_UNIT" "$SLOWDNS_BAK"
+    sed -i "s/-udp :53/-udp ${PUBIP}:53/" "$SLOWDNS_UNIT"
+    systemctl daemon-reload
+    systemctl restart slowdns; sleep 1
+    if ! systemctl is-active --quiet slowdns; then
+        restore_slowdns
+        return 1
+    fi
 }
 setup_dns() {
     if ! command -v dnsmasq >/dev/null 2>&1; then
@@ -1438,6 +1492,10 @@ addn-hosts=$BLOCK_HOSTS
 # network-admin opt-out signal).
 server=/use-application-dns.net/
 DNSEOF
+    if ! free_53_for_dnsmasq; then
+        echo "  content filter: could not coexist with SlowDNS on :53 — skipped"
+        rm -f /etc/dnsmasq.d/abuse-guard.conf /etc/dnsmasq.d/abuse-guard-wild.conf; return 1
+    fi
     systemctl enable dnsmasq >/dev/null 2>&1
     systemctl restart dnsmasq >/dev/null 2>&1; sleep 2
     if ! systemctl is-active --quiet dnsmasq; then
@@ -1531,6 +1589,7 @@ teardown_dns() {
         [ "$(cat "$ABUSE_DIR/dnsmasq_prev" 2>/dev/null)" = disabled ] && systemctl disable dnsmasq >/dev/null 2>&1
         rm -f "$ABUSE_DIR/dnsmasq_prev"
     fi
+    restore_slowdns
 }
 
 status() {
@@ -1677,6 +1736,108 @@ systemctl restart vnstat >/dev/null 2>&1 || true
 success "Bandwidth monitor active on ${PRIMARY_IFACE:-auto}"
 
 # ═══════════════════════════════════════════
+# SECTION 6b2 — SLOWDNS (dnstt) — best-effort, never aborts the installer
+#   Tunnels UDP :53 -> OpenSSH 127.0.0.1:22. Whole phase runs with errexit
+#   OFF so a slow/failed apt, clone or build can never kill the install.
+# ═══════════════════════════════════════════
+phase "SlowDNS (dnstt)"
+set +e
+NS_DOMAIN=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+if [ -n "$NS_DOMAIN" ]; then
+    systemctl stop slowdns >/dev/null 2>&1
+    killall dnstt-server >/dev/null 2>&1
+
+    # --- Free UDP 53: systemd-resolved holds it and silently kills dnstt.
+    #     Disable its stub listener but keep name resolution working. ---
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNSStubListener=no\n' > /etc/systemd/resolved.conf.d/slowdns.conf
+        rm -f /etc/resolv.conf 2>/dev/null
+        printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        systemctl restart systemd-resolved >/dev/null 2>&1
+    fi
+    fuser -k 53/udp >/dev/null 2>&1   # anything else squatting on :53
+
+    # --- Build dnstt-server. dnstt needs a modern Go (>=1.21); apt often ships
+    #     one too old (Debian 11=1.15, 12=1.19), so we try the toolchain on PATH
+    #     first and, if the build fails, install the official go.dev tarball and
+    #     retry. A helper does one build attempt with a given `go` binary. ---
+    if [ ! -x /usr/local/bin/dnstt-server ]; then
+        eval "$APT git golang-go ca-certificates" </dev/null >/dev/null 2>&1
+        cd /root; rm -rf dnstt
+        git clone https://www.bamsoftware.com/git/dnstt.git >/dev/null 2>&1
+
+        _try_build() {   # $1 = path to a go binary
+            [ -x "$1" ] || command -v "$1" >/dev/null 2>&1 || return 1
+            [ -d /root/dnstt/dnstt-server ] || return 1
+            ( cd /root/dnstt/dnstt-server \
+              && export HOME=/root GOCACHE=/tmp/gocache GOPATH=/tmp/gopath GOFLAGS=-mod=mod \
+              && "$1" build -o dnstt-server . >/dev/null 2>&1 \
+              && install -m 0755 dnstt-server /usr/local/bin/dnstt-server )
+        }
+
+        # 1) try whatever `go` apt gave us (fast path on modern distros)
+        APT_GO="$(command -v go 2>/dev/null)"
+        [ -n "$APT_GO" ] && _try_build "$APT_GO"
+
+        # 2) if that didn't produce a binary, fetch modern Go and retry
+        if [ ! -x /usr/local/bin/dnstt-server ]; then
+            ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+            case "$ARCH" in
+                amd64|x86_64)  GOA=amd64;;
+                arm64|aarch64) GOA=arm64;;
+                armhf|armv7l)  GOA=armv6l;;
+                *)             GOA=amd64;;
+            esac
+            if curl -fsSL --connect-timeout 25 -o /tmp/go.tgz \
+                 "https://go.dev/dl/go1.22.5.linux-${GOA}.tar.gz" >/dev/null 2>&1; then
+                rm -rf /usr/local/go; tar -C /usr/local -xzf /tmp/go.tgz >/dev/null 2>&1
+                rm -f /tmp/go.tgz
+                _try_build /usr/local/go/bin/go
+            fi
+        fi
+    fi
+
+    if [ -x /usr/local/bin/dnstt-server ]; then
+        mkdir -p /etc/slowdns
+        # generate the server keypair once; reuse on re-runs
+        if [ ! -s /etc/slowdns/server.key ] || [ ! -s /etc/slowdns/server.pub ]; then
+            ( cd /etc/slowdns && /usr/local/bin/dnstt-server -gen-key \
+                -privkey-file server.key -pubkey-file server.pub >/dev/null 2>&1 )
+        fi
+
+        cat > /etc/systemd/system/slowdns.service <<EOF
+[Unit]
+Description=SlowDNS (dnstt) Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/usr/local/bin/dnstt-server -udp :53 -privkey-file /etc/slowdns/server.key ${NS_DOMAIN} 127.0.0.1:22
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable --now slowdns.service >/dev/null 2>&1
+        if systemctl is-active --quiet slowdns 2>/dev/null; then
+            success "SlowDNS active — UDP 53 -> OpenSSH 22 (NS: $NS_DOMAIN)"
+        else
+            warn "SlowDNS installed but not active — check: journalctl -u slowdns"
+        fi
+    else
+        warn "SlowDNS skipped — could not build dnstt-server (install continues)"
+    fi
+else
+    info "SlowDNS skipped — no NS domain provided"
+fi
+set -e   # re-enable errexit for the rest of the installer
+
+# ═══════════════════════════════════════════
 # SECTION 6c — XRAY HELPER SCRIPTS (config generator + quota/expiry checker)
 #   These are installed but Xray itself stays OFF until activated in the menu.
 # ═══════════════════════════════════════════
@@ -1701,7 +1862,7 @@ C_WS_TLS=2083; C_WS_NONE=8080; C_HTTP_NONE=2082; C_HTTP_TLS=2087; C_SPLIT_TLS=20
 # Ports held by processes OTHER than xray (xray's own current listeners are
 # ignored, so regenerating the config never makes the ports drift on re-runs).
 _busy=" $(ss -ltnpH 2>/dev/null | grep -v '"xray"' | awk '{print $4}' | sed 's/.*://' | sort -un | tr '\n' ' ') "
-_used=" $XAPI 22 80 109 143 443 447 "   # reserved for SSH/SSL/API
+_used=" $XAPI 22 80 109 143 443 447 53 "   # reserved for SSH/SSL/SlowDNS/API
 _alloc() {   # $1 = preferred port, $2 = variable name to set with the free port.
     # NOTE: sets a variable rather than echoing — command substitution runs in a
     # subshell, which would discard the running $_used reservation between calls.
@@ -2084,11 +2245,7 @@ show_ports() {
     crow "$col" "${W}${BOLD}CONNECTION PORTS${NC}"
     line_mid "$col"
     row "$col" "${LIME}▸${NC} WebSocket (payload)  ${GR}→${NC} ${W}${HOST_DISPLAY}:80${NC}"
-    if [ -f "$SSL_PAYLOAD_FLAG" ]; then
-        row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443 ${G}(on)${NC}"
-    else
-        row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443 ${R}(off)${NC}"
-    fi
+    row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443${NC}"
     row "$col" "${LIME}▸${NC} SSL direct SSH       ${GR}→${NC} ${W}${HOST_DISPLAY}:447${NC}"
     row "$col" "${LIME}▸${NC} OpenSSH              ${GR}→${NC} ${W}${HOST_DISPLAY}:22${NC}"
     row "$col" "${LIME}▸${NC} Dropbear             ${GR}→${NC} ${W}${HOST_DISPLAY}:109 / 143${NC}"
@@ -2140,6 +2297,20 @@ create_user() {
     row "$col2" "${GR}SSL / SNI host${NC}  ${W}${HOST_DISPLAY}${NC}"
     line_bot "$col2"
 
+    # --- SlowDNS details (only when installed) ---
+    local ns pub
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat /etc/slowdns/server.pub 2>/dev/null)
+    if [ -n "$ns" ] && [ -x /usr/local/bin/dnstt-server ] && [ -n "$pub" ]; then
+        local col3="$PINK"
+        line_top "$col3"; crow "$col3" "${W}${BOLD}SLOWDNS (DNSTT)${NC}"; line_mid "$col3"
+        row "$col3" "${GR}NS domain${NC}  ${W}${ns}${NC}"
+        row "$col3" "${GR}Server IP${NC}  ${W}${SERVER_IP}${NC}"
+        row "$col3" "${GR}Public key${NC}"
+        row "$col3" "${W}${pub}${NC}"
+        line_bot "$col3"
+        echo -e "  ${GR}Use the same username/password above with a SlowDNS app.${NC}"
+    fi
     pause
 }
 
@@ -2239,25 +2410,6 @@ change_password() {
     pause
 }
 
-change_root_password() {
-    section "CHANGE SERVER (ROOT) PASSWORD" "$R"
-    row "$R" "${Y}This changes the root/SSH login password for THIS server.${NC}"
-    echo ""
-    read -rsp "$(echo -e "  ${C}New root password${NC} : ")" RPASS
-    echo ""
-    [ -z "$RPASS" ] && { err "Password cannot be empty."; pause; return; }
-    read -rsp "$(echo -e "  ${C}Confirm password${NC}  : ")" RPASS2
-    echo ""
-    [ "$RPASS" != "$RPASS2" ] && { err "Passwords do not match."; pause; return; }
-    if printf '%s\n%s\n' "$RPASS" "$RPASS" | passwd root >/dev/null 2>&1; then
-        ok "Root password updated. Use it on your next SSH login."
-    else
-        err "Failed to change root password."
-    fi
-    unset RPASS RPASS2
-    pause
-}
-
 renew_user() {
     section "RENEW / EXTEND ACCOUNT" "$VIOLET"
     read -rp "$(echo -e "  ${C}Username${NC} : ")" USERNAME
@@ -2300,68 +2452,6 @@ restart_services() {
     pause
 }
 
-ssl_payload_menu() {
-    section "SSL PAYLOAD — PORT 443" "$ORANGE"
-    local owner; owner=$(cat "$XP443F" 2>/dev/null)
-    line_top "$ORANGE"
-    if [ -n "$owner" ]; then
-        row "$ORANGE" "${GR}STATUS${NC}  ${P}443 is being used by V2Ray (${owner}).${NC}"
-        row "$ORANGE" "${Y}Use Xray / V2Ray option 6 to return 443 to SSL payload.${NC}"
-        line_bot "$ORANGE"
-        pause
-        return
-    fi
-
-    if [ -f "$SSL_PAYLOAD_FLAG" ]; then
-        row "$ORANGE" "${GR}STATUS${NC}  ${G}enabled${NC}"
-        row "$ORANGE" "${GR}ROUTE${NC}   ${W}443 → SSL → WebSocket → SSH${NC}"
-        line_bot "$ORANGE"; echo ""
-        read -rp "$(echo -e "  ${C}Disable SSL payload on 443?${NC} ${GR}(y/N)${NC} : ")" answer
-        if [[ "$answer" =~ ^[Yy] ]]; then
-            rm -f "$SSL_PAYLOAD_FLAG"
-            write_stunnel_conf no
-            systemctl restart stunnel4 >/dev/null 2>&1
-            sleep 1
-            if ss -ltn 2>/dev/null | grep -q ':443 '; then
-                printf 'on\n' > "$SSL_PAYLOAD_FLAG"
-                write_stunnel_conf yes
-                systemctl restart stunnel4 >/dev/null 2>&1
-                err "Port 443 could not be released; SSL payload remains enabled."
-            else
-                ok "SSL payload disabled. Plain WebSocket on port 80 is unchanged."
-            fi
-        else
-            note "No change."
-        fi
-    else
-        row "$ORANGE" "${GR}STATUS${NC}  ${R}disabled${NC}"
-        row "$ORANGE" "${GR}ROUTE${NC}   ${W}443 is available for manual activation${NC}"
-        line_bot "$ORANGE"; echo ""
-        read -rp "$(echo -e "  ${C}Enable SSL payload on 443?${NC} ${GR}(y/N)${NC} : ")" answer
-        if [[ "$answer" =~ ^[Yy] ]]; then
-            if [ ! -s "$STCERT" ]; then
-                err "SSL certificate is missing; cannot enable SSL payload."
-            else
-                printf 'on\n' > "$SSL_PAYLOAD_FLAG"
-                write_stunnel_conf yes
-                systemctl restart stunnel4 >/dev/null 2>&1
-                sleep 1
-                if ss -ltn 2>/dev/null | grep -q ':443 '; then
-                    ok "SSL payload enabled: 443 → WebSocket → SSH."
-                else
-                    rm -f "$SSL_PAYLOAD_FLAG"
-                    write_stunnel_conf no
-                    systemctl restart stunnel4 >/dev/null 2>&1
-                    err "SSL payload could not bind port 443; it was left disabled."
-                fi
-            fi
-        else
-            note "No change."
-        fi
-    fi
-    pause
-}
-
 # ═══════════════════════════════════════════
 # XRAY / V2RAY (VMESS) — menu-activated, not auto-started
 # ═══════════════════════════════════════════
@@ -2378,7 +2468,6 @@ TR_WS_TLS=2083; TR_WS_NONE=8080; TR_HTTP_NONE=2082; TR_HTTP_TLS=2087; TR_SPLIT_T
 XP443F=/etc/xray/port443
 STCONF=/etc/stunnel/stunnel.conf
 STCERT=/etc/stunnel/stunnel.pem
-SSL_PAYLOAD_FLAG="$CONF_DIR/ssl-payload"
 
 xray_paths() {
     mkdir -p /etc/xray /usr/local/etc/xray
@@ -2438,17 +2527,14 @@ xray_443() {
     if [ -n "$cur" ]; then
         row "$col" "${GR}443 NOW${NC}  ${P}V2Ray — ${cur} (WS-TLS)${NC}"
         row "$col" "${GR}SSL PAYLOAD${NC} ${R}disabled${NC}"
-    elif [ -f "$SSL_PAYLOAD_FLAG" ]; then
-        row "$col" "${GR}443 NOW${NC}  ${G}SSL payload SSH${NC}"
     else
-        row "$col" "${GR}443 NOW${NC}  ${Y}disabled (enable from main menu)${NC}"
+        row "$col" "${GR}443 NOW${NC}  ${G}SSL payload SSH${NC}"
     fi
     line_bot "$col"; echo ""
     if [ -n "$cur" ]; then
         read -rp "$(echo -e "  ${C}Restore SSL-payload SSH on 443?${NC} ${GR}(y/N)${NC} : ")" a
         if [[ "$a" =~ ^[Yy] ]]; then
             rm -f "$XP443F"
-            printf 'on\n' > "$SSL_PAYLOAD_FLAG"
             # Order matters: Xray must RELEASE 443 before stunnel can bind it.
             rebuild_config; systemctl restart xray >/dev/null 2>&1
             sleep 1
@@ -2470,13 +2556,8 @@ xray_443() {
         line_top "$wcol"
         crow "$wcol" "${Y}${BOLD}⚠  WARNING${NC}"
         line_mid "$wcol"
-        if [ -f "$SSL_PAYLOAD_FLAG" ]; then
-            row "$wcol" "${W}This disables SSL-payload SSH on port 443.${NC}"
-            row "$wcol" "${GR}443 SSH users stop working · 80/109/143/447 stay up${NC}"
-        else
-            row "$wcol" "${W}SSL-payload SSH is already disabled on port 443.${NC}"
-            row "$wcol" "${GR}Choosing V2Ray will assign port 443 to its WS-TLS listener.${NC}"
-        fi
+        row "$wcol" "${W}This disables SSL-payload SSH on port 443.${NC}"
+        row "$wcol" "${GR}443 SSH users stop working · 80/109/143/447 stay up${NC}"
         line_bot "$wcol"
         echo ""
         echo -e "  ${C}${BOLD}Give 443 to which V2Ray protocol?${NC}"
@@ -2490,7 +2571,6 @@ xray_443() {
         local proto=""
         case "$pc" in 1) proto=vmess;; 2) proto=vless;; 3) proto=trojan;; *) note "Cancelled."; pause; return;; esac
         if ! xray_install; then err "Xray must be installed first — create an account."; pause; return; fi
-        rm -f "$SSL_PAYLOAD_FLAG"
         echo "$proto" > "$XP443F"
         # Xray usually runs as a non-root user; 443 is a privileged port.
         # Grant CAP_NET_BIND_SERVICE via a systemd drop-in (idempotent).
@@ -2516,7 +2596,6 @@ DROPEOF
             note "Rolling back — 443 returns to SSL-payload SSH."
             rm -f "$XP443F"; rebuild_config
             systemctl restart xray >/dev/null 2>&1
-            printf 'on\n' > "$SSL_PAYLOAD_FLAG"
             write_stunnel_conf yes; systemctl restart stunnel4 >/dev/null 2>&1
         fi
     fi
@@ -2743,13 +2822,7 @@ xray_menu() {
         row "$col" "${GR}STATUS${NC}  ${st}"
         row "$col" "${GR}HOST${NC}    ${Y}${XHOST}${NC}"
         row "$col" "${GR}ACCTS${NC}   ${C}$(grep -c '|' "$XACC" 2>/dev/null | grep . || echo 0)${NC}"
-        if [ -n "$p443" ]; then
-            row "$col" "${GR}PORT443${NC} ${P}V2Ray (${p443})${NC}"
-        elif [ -f "$SSL_PAYLOAD_FLAG" ]; then
-            row "$col" "${GR}PORT443${NC} ${G}SSL payload SSH${NC}"
-        else
-            row "$col" "${GR}PORT443${NC} ${Y}disabled${NC}"
-        fi
+        if [ -n "$p443" ]; then row "$col" "${GR}PORT443${NC} ${P}V2Ray (${p443})${NC}"; else row "$col" "${GR}PORT443${NC} ${G}SSL payload SSH${NC}"; fi
         line_bot "$col"
         echo ""
         menu_item "1" "⚡" "Create account (VMess/VLESS/Trojan)" "$LIME"
@@ -2769,6 +2842,177 @@ xray_menu() {
             5) systemctl stop xray >/dev/null 2>&1; ok "Xray stopped."; sleep 1 ;;
             6) xray_443 ;;
             0) break ;;
+            *) err "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
+slowdns_info() {
+    section "SLOWDNS (DNSTT)" "$PINK"
+    local col="$PINK"
+    local ns pub st
+    ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    pub=$(cat /etc/slowdns/server.pub 2>/dev/null)
+    line_top "$col"
+    if [ -z "$ns" ] || [ ! -x /usr/local/bin/dnstt-server ]; then
+        row "$col" "${GR}SlowDNS is not installed on this server.${NC}"
+        row "$col" "${GR}Re-run the installer and enter an NS domain.${NC}"
+        line_bot "$col"; pause; return
+    fi
+    if systemctl is-active --quiet slowdns 2>/dev/null; then
+        st="${G}● running${NC}"; else st="${R}○ stopped${NC}"; fi
+    row "$col" "${GR}Status${NC}    $st"
+    row "$col" "${GR}NS domain${NC} ${W}${ns}${NC}"
+    row "$col" "${GR}Backend${NC}   ${W}127.0.0.1:22 (OpenSSH)${NC}"
+    row "$col" "${GR}Server IP${NC} ${W}${SERVER_IP}${NC}"
+    line_mid "$col"
+    row "$col" "${GR}Public key${NC}"
+    row "$col" "${W}${pub}${NC}"
+    line_bot "$col"
+    echo ""
+    echo -e "  ${GR}Client: use NS '${W}${ns}${GR}', the public key above, and any${NC}"
+    echo -e "  ${GR}SlowDNS-capable app (SSH account = your normal users).${NC}"
+    pause
+}
+
+# ── FAST DNS (SlowDNS upstream-resolver booster) ──────────
+# Points the server's OWN upstream resolver at the fastest public pair
+# (1.1.1.1 primary + 8.8.8.8 fallback) with a short timeout. Every name
+# lookup made by traffic exiting the SlowDNS tunnel resolves through this,
+# so pages start loading sooner. It ONLY rewrites the upstream resolver —
+# it never touches port 53, dnstt, iptables, or any protocol, so it cannot
+# break SlowDNS or the other tunnels. Reversible and self-healing: if the
+# new resolver ever fails a live lookup, it auto-restores the old one.
+FASTDNS_MARK="$CONF_DIR/fastdns.on"
+FASTDNS_BAK="$CONF_DIR/resolv.fastdns.bak"
+FASTDNS_PRIMARY="1.1.1.1"
+FASTDNS_FALLBACK="8.8.8.8"
+
+fastdns_ready() {   # SlowDNS must be installed AND running
+    local ns; ns=$(cat "$CONF_DIR/nsdomain.conf" 2>/dev/null)
+    [ -n "$ns" ] && [ -x /usr/local/bin/dnstt-server ] \
+        && systemctl is-active --quiet slowdns 2>/dev/null
+}
+
+fastdns_active() { [ -f "$FASTDNS_MARK" ]; }
+
+# content filter (abuse-guard) owns resolv.conf when it points at dnsmasq
+fastdns_filter_owns() {
+    systemctl is-active --quiet dnsmasq 2>/dev/null \
+        && grep -q '^nameserver[[:space:]]\+127\.0\.0\.1' /etc/resolv.conf 2>/dev/null
+}
+
+# animated step: fastdns_step "message" "shell command..."
+fastdns_step() {
+    local msg="$1"; shift
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    ( "$@" ) >/dev/null 2>&1 & local pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  ${SKY}%s${NC} ${W}%s${NC}" "${frames[$((i % 10))]}" "$msg"
+        i=$((i+1)); sleep 0.08
+    done
+    wait "$pid"; local rc=$?
+    if [ $rc -eq 0 ]; then printf "\r  ${G}✔${NC} ${W}%s${NC}\033[K\n" "$msg"
+    else printf "\r  ${R}✘${NC} ${W}%s${NC}\033[K\n" "$msg"; fi
+    return $rc
+}
+
+fastdns_verify() { getent hosts one.one.one.one >/dev/null 2>&1 || getent hosts cloudflare.com >/dev/null 2>&1; }
+
+fastdns_write_resolv() {
+    rm -f /etc/resolv.conf 2>/dev/null
+    printf 'nameserver %s\nnameserver %s\noptions timeout:2 attempts:2 rotate\n' \
+        "$FASTDNS_PRIMARY" "$FASTDNS_FALLBACK" > /etc/resolv.conf
+}
+
+fastdns_apply() {
+    section "ACTIVATE FAST DNS" "$TEAL"
+    if ! fastdns_ready; then
+        local col="$ORANGE"; line_top "$col"
+        crow "$col" "${W}${BOLD}⚠ SLOWDNS REQUIRED${NC}"; line_mid "$col"
+        row "$col" "${GR}Fast DNS boosts SlowDNS — activate SlowDNS first.${NC}"
+        row "$col" "${GR}Re-run the installer with an NS domain, then start it.${NC}"
+        line_bot "$col"; pause; return
+    fi
+    echo -e "  ${GR}Boosting SlowDNS with the fastest upstream resolvers${NC}"
+    echo -e "  ${GR}(${W}${FASTDNS_PRIMARY}${GR} primary · ${W}${FASTDNS_FALLBACK}${GR} fallback). This only changes${NC}"
+    echo -e "  ${GR}the resolver — no port, tunnel or protocol is touched.${NC}\n"
+
+    fastdns_step "Checking SlowDNS tunnel" sleep 0.6
+
+    if fastdns_filter_owns; then
+        # Abuse-guard's dnsmasq already forwards to 1.1.1.1 + 8.8.8.8.
+        # Overwriting resolv.conf here would disable the content filter, so
+        # we leave it in place — fast DNS is effectively already applied.
+        fastdns_step "Detected content filter — keeping it intact" sleep 0.6
+        fastdns_step "Confirming fast upstream via filter" fastdns_verify
+        : > "$FASTDNS_MARK"
+        echo ""
+        local col="$G"; line_top "$col"
+        crow "$col" "${W}${BOLD}⚡ FAST DNS ON (via filter)${NC}"; line_mid "$col"
+        row "$col" "${GR}Upstream${NC}  ${W}${FASTDNS_PRIMARY} · ${FASTDNS_FALLBACK}${NC}"
+        row "$col" "${GR}Managed by${NC} ${W}content filter (dnsmasq)${NC}"
+        line_bot "$col"; pause; return
+    fi
+
+    # back up current resolver once, then apply
+    [ -f "$FASTDNS_BAK" ] || cp -f /etc/resolv.conf "$FASTDNS_BAK" 2>/dev/null
+    fastdns_step "Selecting fastest resolvers" sleep 0.5
+    fastdns_step "Applying upstream resolver" fastdns_write_resolv
+
+    if ! fastdns_step "Verifying live resolution" fastdns_verify; then
+        # never leave DNS broken — roll back immediately
+        [ -f "$FASTDNS_BAK" ] && cp -f "$FASTDNS_BAK" /etc/resolv.conf 2>/dev/null
+        echo ""
+        err "Verification failed — restored the previous resolver. No change made."
+        pause; return
+    fi
+    : > "$FASTDNS_MARK"
+    echo ""
+    local col="$G"; line_top "$col"
+    crow "$col" "${W}${BOLD}⚡ FAST DNS ACTIVATED${NC}"; line_mid "$col"
+    row "$col" "${GR}Primary${NC}   ${W}${FASTDNS_PRIMARY}${NC}  ${GR}(Cloudflare)${NC}"
+    row "$col" "${GR}Fallback${NC}  ${W}${FASTDNS_FALLBACK}${NC}  ${GR}(Google)${NC}"
+    row "$col" "${GR}Applies to${NC} ${W}all traffic exiting the SlowDNS tunnel${NC}"
+    line_bot "$col"
+    echo -e "\n  ${GR}SlowDNS lookups now resolve through the fastest path.${NC}"
+    pause
+}
+
+fastdns_revert() {
+    section "FAST DNS — REVERT" "$ORANGE"
+    if ! fastdns_active; then
+        note "Fast DNS is not active — nothing to revert."; pause; return
+    fi
+    if fastdns_filter_owns; then
+        rm -f "$FASTDNS_MARK"
+        ok "Content filter still manages DNS — fast-DNS marker cleared."
+        pause; return
+    fi
+    fastdns_step "Restoring previous resolver" bash -c '[ -f "'"$FASTDNS_BAK"'" ] && cp -f "'"$FASTDNS_BAK"'" /etc/resolv.conf'
+    fastdns_step "Verifying live resolution" fastdns_verify || true
+    rm -f "$FASTDNS_MARK" "$FASTDNS_BAK"
+    echo ""
+    ok "Reverted to the previous resolver."
+    pause
+}
+
+fastdns_menu() {
+    while true; do
+        section "FAST DNS (SLOWDNS BOOSTER)" "$TEAL"
+        local st
+        if fastdns_active; then st="${G}● active${NC}"; else st="${GR}○ off${NC}"; fi
+        echo -e "  ${GR}Status${NC} : $st\n"
+        menu_item "1" "🚀" "Activate fast DNS"   "$G"
+        menu_item "2" "↩ " "Revert to default"   "$ORANGE"
+        menu_item "0" "↩ " "Back to main menu"   "$GR"
+        echo ""
+        read -rp "$(echo -e "  ${TEAL}❯${NC} select an option : ")" fo
+        case "$fo" in
+            1) fastdns_apply ;;
+            2) fastdns_revert ;;
+            0) return ;;
             *) err "Invalid option."; sleep 1 ;;
         esac
     done
@@ -2809,7 +3053,7 @@ abuse_menu() {
 # payloads or bug hosts. It listens on ONE base UDP port and iptables REDIRECTs
 # a whole UDP port-hopping range onto it, so throttling a single port can't kill
 # it. UDP-only + a dedicated INPUT/nat rule set => it never touches the TCP
-# protocols (SSH/SSL/WS/V2Ray).
+# protocols (SSH/SSL/WS/V2Ray) or SlowDNS (UDP 53, outside the range).
 HY_BIN=/usr/local/bin/hysteria
 HY_DIR=/etc/hysteria
 HY_CONF=$HY_DIR/config.json
@@ -3078,7 +3322,6 @@ while true; do
     menu_item "4" "o" "Show online users"           "$G"
     menu_item "5" "*" "Change user password"        "$ORANGE"
     menu_item "6" "+" "Renew / extend account"      "$VIOLET"
-    menu_item "11" "!" "Change server password"     "$R"
     echo ""
     menu_group "SERVICE MONITORING"
     menu_item "7" "@" "Service status"              "$C"
@@ -3087,9 +3330,10 @@ while true; do
     echo ""
     menu_group "TUNNELS & PROTECTION"
     menu_item "9" "#" "Xray / V2Ray (VMess)"        "$PINK"
+    menu_item "11" "~" "SlowDNS info"               "$PINK"
     menu_item "12" "+" "Abuse protection"           "$LIME"
     menu_item "13" ">" "UDP (Hysteria) high-speed"  "$SKY"
-    menu_item "14" "S" "Switch SSL payload on/off"  "$ORANGE"
+    menu_item "14" ">" "Activate fast DNS"          "$TEAL"
     echo ""
     menu_group "SESSION"
     menu_item "0" "<" "Exit"                        "$GR"
@@ -3103,14 +3347,14 @@ while true; do
         4) online_users ;;
         5) change_password ;;
         6) renew_user ;;
-        11) change_root_password ;;
         7) service_status ;;
         8) bandwidth ;;
         9) xray_menu ;;
         10) restart_services ;;
+        11) slowdns_info ;;
         12) abuse_menu ;;
         13) hysteria_menu ;;
-        14) ssl_payload_menu ;;
+        14) fastdns_menu ;;
         0) clear; echo -e "  ${CORAL}Goodbye from baymaxssh.${NC}\n"; exit 0 ;;
         *) echo -e "  ${R}Invalid option.${NC}"; sleep 1 ;;
     esac
@@ -3205,7 +3449,7 @@ echo -e "  ${TEAL}╭───────────────────�
 printf  "  ${TEAL}│${NC}  ${SKY}◆${NC} %-13s ${BWHITE}${BOLD}%-33.33s${NC}${TEAL}│${NC}\n" "Host / Domain" "${DOMAIN:-$SERVER_IP}"
 echo -e "  ${TEAL}├─ ${BWHITE}${BOLD}SERVICES & PORTS${NC} ${TEAL}──────────────────────────────────┤${NC}"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "WebSocket (payload)" "80"
-printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL + payload (TLS)" "443 (manual)"
+printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL + payload (TLS)" "443"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "SSL direct SSH (TLS)" "447"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "OpenSSH" "22"
 printf  "  ${TEAL}│${NC}   ${LIME}▸${NC} %-22s ${BWHITE}%-24s${NC}${TEAL}│${NC}\n" "Dropbear" "109, 143"
@@ -3216,7 +3460,6 @@ echo ""
 echo -e "  ${GRY}Client tips${NC}"
 echo -e "    ${DIM}WS payload${NC}  GET / HTTP/1.1[crlf]Host: ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}[crlf]Upgrade: websocket[crlf][crlf]"
 echo -e "    ${DIM}SSL/SNI${NC}     ${BWHITE}${DOMAIN:-$SERVER_IP}${NC}"
-echo -e "    ${DIM}SSL payload${NC}  ${BWHITE}off by default — enable with menu option 14${NC}"
 echo ""
 echo -e "  ${TEAL}${BOLD}▸${NC} Type ${LIME}${BOLD}menu${NC} to open the control panel and create users."
 echo ""
