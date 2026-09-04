@@ -1946,7 +1946,7 @@ BGreen="$G"; BYellow="$Y"; BCyan="$C"; BRed="$R"; BPurple="$P"
 CONF_DIR=/etc/ssh-panel
 DOMAIN=$(cat "$CONF_DIR/domain.conf" 2>/dev/null)
 SERVER_IP=$(cat "$CONF_DIR/ip.conf" 2>/dev/null)
-HOST_DISPLAY="${DOMAIN:-${SERVER_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}}"
+HOST_DISPLAY="${DOMAIN:-$SERVER_IP}"
 
 [[ $EUID -ne 0 ]] && { echo -e "${R}Run as root: sudo menu${NC}"; exit 1; }
 
@@ -2075,14 +2075,6 @@ status_bar() {
         svcline+="${dot} ${s}   "
     done
     row "$col" "$svcline"
-    local p443_owner; p443_owner=$(cat "$XP443F" 2>/dev/null)
-    if [ -n "$p443_owner" ]; then
-        row "$col" "${GR}443${NC}     ${P}V2Ray (${p443_owner})${NC}"
-    elif [ -f "$SSL_PAYLOAD_FLAG" ]; then
-        row "$col" "${GR}443${NC}     ${G}SSL payload SSH${NC}"
-    else
-        row "$col" "${GR}443${NC}     ${Y}SSL payload off${NC}"
-    fi
     line_bot "$col"
 }
 
@@ -2092,10 +2084,7 @@ show_ports() {
     crow "$col" "${W}${BOLD}CONNECTION PORTS${NC}"
     line_mid "$col"
     row "$col" "${LIME}▸${NC} WebSocket (payload)  ${GR}→${NC} ${W}${HOST_DISPLAY}:80${NC}"
-    local p443_owner; p443_owner=$(cat "$XP443F" 2>/dev/null)
-    if [ -n "$p443_owner" ]; then
-        row "$col" "${LIME}▸${NC} Port 443 (V2Ray)     ${GR}→${NC} ${W}${HOST_DISPLAY}:443${NC}"
-    elif [ -f "$SSL_PAYLOAD_FLAG" ]; then
+    if [ -f "$SSL_PAYLOAD_FLAG" ]; then
         row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443 ${G}(on)${NC}"
     else
         row "$col" "${LIME}▸${NC} SSL + payload (TLS)  ${GR}→${NC} ${W}${HOST_DISPLAY}:443 ${R}(off)${NC}"
@@ -3089,8 +3078,6 @@ while true; do
     menu_item "4" "o" "Show online users"           "$G"
     menu_item "5" "*" "Change user password"        "$ORANGE"
     menu_item "6" "+" "Renew / extend account"      "$VIOLET"
-    echo ""
-    menu_group "SERVER ACCESS"
     menu_item "11" "!" "Change server password"     "$R"
     echo ""
     menu_group "SERVICE MONITORING"
@@ -3098,14 +3085,11 @@ while true; do
     menu_item "8" "~" "Bandwidth usage"             "$SKY"
     menu_item "10" ">" "Restart all services"       "$Y"
     echo ""
-    menu_group "TUNNELS & SECURITY"
+    menu_group "TUNNELS & PROTECTION"
     menu_item "9" "#" "Xray / V2Ray (VMess)"        "$PINK"
     menu_item "12" "+" "Abuse protection"           "$LIME"
     menu_item "13" ">" "UDP (Hysteria) high-speed"  "$SKY"
-    SSL_MENU_STATE="OFF"
-    [ -f "$SSL_PAYLOAD_FLAG" ] && SSL_MENU_STATE="ON"
-    [ -n "$(cat "$XP443F" 2>/dev/null)" ] && SSL_MENU_STATE="V2RAY"
-    menu_item "14" "S" "SSL payload on/off (443) [${SSL_MENU_STATE}]" "$ORANGE"
+    menu_item "14" "S" "Switch SSL payload on/off"  "$ORANGE"
     echo ""
     menu_group "SESSION"
     menu_item "0" "<" "Exit"                        "$GR"
